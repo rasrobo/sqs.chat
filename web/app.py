@@ -735,7 +735,7 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
 
             if "bytes" in data:
                 if transcriber.chunk_count < 3:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Binary chunk size={len(data['bytes'])}", flush=True)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Binary chunk size={len(data['bytes'])} first_bytes={data['bytes'][:16].hex()}", flush=True)
                 audio_chunk = data["bytes"]
                 transcriber.add_chunk(audio_chunk)
 
