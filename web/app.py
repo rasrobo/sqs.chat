@@ -528,6 +528,29 @@ def pcm_to_wav_file(pcm_data: bytes, output_path: str, sample_rate: int = 16000)
         w.writeframes(pcm_data)
 
 
+def decode_webm_to_wav(webm_data: bytes, output_path: str) -> bool:
+    import subprocess
+    tmp_webm = output_path + ".tmp.webm"
+    try:
+        with open(tmp_webm, "wb") as f:
+            f.write(webm_data)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_webm, "-ar", "16000", "-ac", "1",
+             "-sample_fmt", "s16", "-f", "wav", output_path],
+            capture_output=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"[FFmpeg] Error decoding WebM: {result.stderr.decode()[:200]}", flush=True)
+            return False
+        return True
+    except Exception as e:
+        print(f"[FFmpeg] Exception decoding WebM: {e}", flush=True)
+        return False
+    finally:
+        if os.path.exists(tmp_webm):
+            os.unlink(tmp_webm)
+
+
 async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float = None):
     import time as _time
     transcribe_start = _time.time()
@@ -573,7 +596,14 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
 
     tmp_wav = os.path.join(transcriber.tmp_dir, f"chunk_{uuid.uuid4()}.wav")
     try:
-        pcm_to_wav_file(audio, tmp_wav)
+        audio_is_webm = len(audio) > 4 and audio[:4] not in (b"RIFF",)
+        if audio_is_webm:
+            decode_ok = decode_webm_to_wav(audio, tmp_wav)
+            if not decode_ok:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] WebM decode failed, falling back to raw PCM", flush=True)
+                pcm_to_wav_file(audio, tmp_wav)
+        else:
+            pcm_to_wav_file(audio, tmp_wav)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Write audio failed: {e}")
         transcriber.set_transcribing(False)
