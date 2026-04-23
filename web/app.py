@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
@@ -127,6 +127,33 @@ def init_db():
             ip_address TEXT
         )
     """)
+    # Migration: rename old sessions.pat_id -> user_id, add missing columns
+    try:
+        c.execute("SELECT pat_id FROM sessions LIMIT 1")
+        has_old_schema = True
+    except Exception:
+        has_old_schema = False
+    if has_old_schema:
+        c.execute("PRAGMA table_info(sessions)")
+        cols = {r[1] for r in c.fetchall()}
+        if "pat_id" in cols and "user_id" not in cols:
+            c.execute("ALTER TABLE sessions RENAME TO sessions_old")
+            c.execute("""
+                CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL UNIQUE,
+                    user_id TEXT,
+                    username TEXT,
+                    avatar_url TEXT,
+                    auth_method TEXT DEFAULT 'pat',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    expires_at TEXT NOT NULL,
+                    remember INTEGER DEFAULT 0
+                )
+            """)
+            c.execute("""INSERT INTO sessions (session_id, user_id, created_at, expires_at, remember)
+                         SELECT session_id, pat_id, created_at, expires_at, remember FROM sessions_old""")
+            c.execute("DROP TABLE sessions_old")
     conn.commit()
     conn.close()
 
