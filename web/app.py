@@ -607,6 +607,11 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
     tmp_wav = os.path.join(transcriber.tmp_dir, f"chunk_{uuid.uuid4()}.wav")
     try:
         pcm_to_wav_file(audio, tmp_wav)
+        # Debug: save a copy of the WAV for inspection
+        debug_wav = os.path.join(UPLOAD_DIR, f"debug_{uuid.uuid4()}.wav")
+        with open(tmp_wav, "rb") as src, open(debug_wav, "wb") as dst:
+            dst.write(src.read())
+        os.chmod(debug_wav, 0o644)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Write audio failed: {e}")
         transcriber.set_transcribing(False)
