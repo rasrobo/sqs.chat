@@ -596,14 +596,7 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
 
     tmp_wav = os.path.join(transcriber.tmp_dir, f"chunk_{uuid.uuid4()}.wav")
     try:
-        audio_is_webm = len(audio) > 4 and audio[:4] not in (b"RIFF",)
-        if audio_is_webm:
-            decode_ok = decode_webm_to_wav(audio, tmp_wav)
-            if not decode_ok:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] WebM decode failed, falling back to raw PCM", flush=True)
-                pcm_to_wav_file(audio, tmp_wav)
-        else:
-            pcm_to_wav_file(audio, tmp_wav)
+        pcm_to_wav_file(audio, tmp_wav)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Write audio failed: {e}")
         transcriber.set_transcribing(False)
@@ -735,7 +728,7 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
 
             if "bytes" in data:
                 if transcriber.chunk_count < 3:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Binary chunk size={len(data['bytes'])} first_bytes={data['bytes'][:16].hex()}", flush=True)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Binary chunk size={len(data['bytes'])}", flush=True)
                 audio_chunk = data["bytes"]
                 transcriber.add_chunk(audio_chunk)
 
@@ -1492,33 +1485,41 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             <button class="close-btn" onclick="closeHelp()">&times;</button>
             <h2>How to use SQS Signal</h2>
 
-            <h3>Transcription requires sign-in</h3>
-            <p>You are signed in. All transcription is authenticated.</p>
+            <h3>What is SQS Signal?</h3>
+            <p>A self-hosted, open-source dictation app. Speak your draft faster than you'd type it.
+            Your audio stays under your control — everything runs on your own infrastructure.</p>
 
-            <h3>Mic Mode (record then transcribe)</h3>
+            <h3>Mic Mode (dictate then transcribe)</h3>
             <ul>
-                <li>Click the mic button to start recording</li>
-                <li>Short clips (5-20 seconds) work best on this CPU server</li>
-                <li>Click stop to transcribe — the app sends the last ~4 seconds to Whisper</li>
+                <li>Click the mic button to start dictating</li>
+                <li>Speak naturally — short bursts of 5-20 seconds work best on this CPU server</li>
+                <li>Click stop to transcribe — the app sends your audio to Whisper</li>
                 <li>You have a daily limit of <strong>15 minutes</strong> per user (shown in the top bar)</li>
                 <li>When the quota runs out, the mic button is disabled. Try upload instead.</li>
-                <li>Uses the faster <code>tiny.en</code> model for quick turnaround</li>
+                <li>Uses the <code>tiny.en</code> model for fast dictation turnaround</li>
             </ul>
 
             <h3>Upload Mode</h3>
             <ul>
                 <li>Drag and drop or click to browse audio/video files (up to 50 MB)</li>
-                <li>Uses the better <code>small.en</code> model</li>
+                <li>Uses the better <code>small.en</code> model for accurate transcription</li>
                 <li>No daily quota — upload as much as you like</li>
                 <li>Supports most audio/video formats via ffmpeg</li>
             </ul>
 
             <h3>Tips</h3>
             <ul>
-                <li>Use mic for quick notes, upload for anything important</li>
+                <li>Use mic for quick dictation, upload for finished recordings</li>
                 <li>Anti-hallucination filtering removes common false positives from short clips</li>
                 <li>Results can be copied to clipboard or downloaded as .txt</li>
                 <li>The debug panel shows what the app is doing in real time</li>
+            </ul>
+
+            <h3>Open-source stack</h3>
+            <ul>
+                <li><a href="https://github.com/openai/whisper" target="_blank">OpenAI Whisper</a> — speech-to-text model</li>
+                <li><a href="https://fastapi.tiangolo.com/" target="_blank">FastAPI</a> — Python web framework</li>
+                <li><a href="https://caddyserver.com/" target="_blank">Caddy</a> — reverse proxy with automatic HTTPS</li>
             </ul>
 
             <h3>Support</h3>
