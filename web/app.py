@@ -577,16 +577,6 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
         transcriber.set_transcribing(False)
         return
 
-    # Log audio amplitude for debugging
-    if len(audio) >= 2:
-        try:
-            samples = struct.unpack(f"<{min(len(audio)//2, 16000)}h", audio[:min(len(audio)//2, 16000)*2])
-            max_amp = max(abs(s) for s in samples) if samples else 0
-            rms = (sum(s*s for s in samples) / len(samples)) ** 0.5 if samples else 0
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Audio level: max={max_amp} rms={rms:.1f}", flush=True)
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Level check failed: {e}", flush=True)
-
     # Energy check for live (not stopped) — skip silent buffers
     if not is_stopped and len(audio) >= 2:
         try:
@@ -607,11 +597,6 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
     tmp_wav = os.path.join(transcriber.tmp_dir, f"chunk_{uuid.uuid4()}.wav")
     try:
         pcm_to_wav_file(audio, tmp_wav)
-        # Debug: save a copy of the WAV for inspection
-        debug_wav = os.path.join(UPLOAD_DIR, f"debug_{uuid.uuid4()}.wav")
-        with open(tmp_wav, "rb") as src, open(debug_wav, "wb") as dst:
-            dst.write(src.read())
-        os.chmod(debug_wav, 0o644)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Write audio failed: {e}")
         transcriber.set_transcribing(False)
@@ -1941,12 +1926,13 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 var mimeType = getSupportedMimeType();
                 debug('info', 'MediaRecorder MIME: ' + (mimeType || 'default'));
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                audioContext.resume();
                 var source = audioContext.createMediaStreamSource(stream);
                 analyser = audioContext.createAnalyser();
                 analyser.fftSize = 256;
                 source.connect(analyser);
                 var scriptProc = audioContext.createScriptProcessor(4096, 1, 1);
-                scriptProc.onaudioprocess = function(e) { if (!isRecording) return; var pcmData = e.inputBuffer.getChannelData(0); pcmChunks.push(new Float32Array(pcmData)); lastSpeechTime = Date.now(); if (pcmChunks.length <= 2) { var sum = 0; for (var k = 0; k < Math.min(pcmData.length, 100); k++) sum += Math.abs(pcmData[k]); debug('info', 'PCM sample check: len=' + pcmData.length + ' sum100=' + sum.toFixed(4)); } };
+                scriptProc.onaudioprocess = function(e) { if (!isRecording) return; pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); lastSpeechTime = Date.now(); };
                 source.connect(scriptProc); scriptProc.connect(audioContext.destination);
                 chunks = [];
                 recorder = new MediaRecorder(stream, { mimeType: mimeType || undefined });
