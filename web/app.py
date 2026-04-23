@@ -545,6 +545,16 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] transcribe_buffer: total={total_buffer_len} bytes (~{approx_total_duration:.1f}s), window={window_len} bytes (~{approx_window_duration:.1f}s), is_stopped={is_stopped}", flush=True)
 
+    # Guardrail: reject empty or tiny audio
+    if len(audio) < 44:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] GUARDRAIL: audio too small ({len(audio)} bytes < 44), skipping", flush=True)
+        if is_stopped:
+            import traceback
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] GUARDRAIL: final transcription got tiny audio - try speaking again\n{traceback.format_stack()[-3]}", flush=True)
+        transcriber.set_transcribing(False)
+        return
+
+    # Energy check for live (not stopped) — skip silent buffers
     if not is_stopped and len(audio) >= 2:
         try:
             samples = struct.unpack(f"<{len(audio)//2}h", audio[:len(audio)//2*2])
@@ -558,10 +568,6 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
 
     if not is_stopped and len(audio) < 8000:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer too small for live: {len(audio)} < 8000", flush=True)
-        transcriber.set_transcribing(False)
-        return
-    if len(audio) == 0:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Empty buffer, skipping", flush=True)
         transcriber.set_transcribing(False)
         return
 
@@ -715,22 +721,20 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
                         stop_start = _t.time()
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Stop received", flush=True)
                         full_buffer = transcriber.get_buffer()
-                        windowed_buffer = transcriber.get_windowed_buffer(transcriber.stop_window_sec)
                         full_duration = len(full_buffer) / 32000.0
-                        window_duration = len(windowed_buffer) / 32000.0
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer: {len(full_buffer)} bytes ({full_duration:.2f}s total), window: {len(windowed_buffer)} bytes ({window_duration:.2f}s for transcription)", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer: {len(full_buffer)} bytes ({full_duration:.2f}s total), transcribing FULL buffer", flush=True)
                         transcriber.mark_stopped()
                         transcriber.set_transcribing(True)
                         t = LiveTranscriber(websocket, transcriber.language)
-                        t.audio_buffer = transcriber.get_windowed_buffer(transcriber.stop_window_sec)
+                        t.audio_buffer = transcriber.get_buffer()
                         t.chunk_count = transcriber.chunk_count
                         t.session_id = transcriber.session_id
                         t.tmp_dir = transcriber.tmp_dir
                         t.mark_stopped()
                         transcriber.last_transcribe_time = _t.time()
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Starting final transcription (windowed: last {transcriber.stop_window_sec}s, fast mode: beam_size=1)...", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Starting final transcription (FULL buffer: {full_duration:.1f}s, fast mode: beam_size=1)...", flush=True)
                         transcribe_start = _t.time()
-                        result = await run_transcribe(t, transcriber.stop_window_sec)
+                        result = await run_transcribe(t, 0)
                         transcribe_elapsed = _t.time() - transcribe_start
                         total_elapsed = _t.time() - stop_start
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Transcribe result: '{result}' (len={len(result) if result else 0})", flush=True)
@@ -1866,6 +1870,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             if (recorder && recorder.state === "recording") recorder.stop();
             if (wsRef && wsConnRef && wsRef.readyState === WebSocket.OPEN) {
                 stopSendInterval();
+                // Send ALL accumulated pcmChunks as one final blob
                 var wavBlob = pcmChunksToWav(pcmChunks, pcmSampleRate);
                 debug("info", "Final audio blob size: " + wavBlob.size + " pcmChunks=" + pcmChunks.length + " wsState=" + wsRef.readyState);
                 // Always send final audio when stopping, even if small
