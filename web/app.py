@@ -577,6 +577,16 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
         transcriber.set_transcribing(False)
         return
 
+    # Log audio amplitude for debugging
+    if len(audio) >= 2:
+        try:
+            samples = struct.unpack(f"<{min(len(audio)//2, 16000)}h", audio[:min(len(audio)//2, 16000)*2])
+            max_amp = max(abs(s) for s in samples) if samples else 0
+            rms = (sum(s*s for s in samples) / len(samples)) ** 0.5 if samples else 0
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Audio level: max={max_amp} rms={rms:.1f}", flush=True)
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Level check failed: {e}", flush=True)
+
     # Energy check for live (not stopped) — skip silent buffers
     if not is_stopped and len(audio) >= 2:
         try:
