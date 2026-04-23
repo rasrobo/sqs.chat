@@ -1,0 +1,72 @@
+services:
+  whisper-service:
+    image: docker-whisper-service:latest
+    ports:
+      - "8891:8000"
+    volumes:
+      - whisper_models:/root/.cache/whisper
+      - whisper_uploads:/app/uploads
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-small.en}
+    restart: unless-stopped
+    networks:
+      - whisper_flow_network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\"); print()'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "8892:8000"
+    env_file:
+      - .env
+    environment:
+      - WHISPER_SERVICE_URL=http://whisper-service:8000
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      - COOKIE_SECURE=${COOKIE_SECURE:-False}
+      - AUTH_TOKEN=${AUTH_TOKEN}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - GITHUB_CALLBACK_URL=${GITHUB_CALLBACK_URL:-https://sqs.chat/auth/github/callback}
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      whisper-service:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - whisper_flow_network
+
+  caddy:
+    image: caddy:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./uploads:/var/www/uploads:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+    networks:
+      - whisper_flow_network
+
+networks:
+  whisper_flow_network:
+    driver: bridge
+
+volumes:
+  whisper_models:
+  whisper_uploads:
+  caddy_data:
+  caddy_config:

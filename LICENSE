@@ -1,0 +1,36 @@
+SQS Signal License — Sustainable Use Terms
+Version 1.0, April 2026
+
+Copyright (c) 2026 Ras Robo / Side Quest Studios
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of this software and associated documentation files (the
+"Software"), to use, copy, modify, merge, publish, and distribute the Software,
+subject to the following conditions:
+
+1. **Sustainable Use**: The Software may be used for any lawful purpose,
+   provided that the use does not constitute a competing hosted transcription
+   service offered to third parties for a fee. If you wish to offer the
+   Software (or a substantially similar derivative) as a commercial service,
+   you must obtain explicit permission from the copyright holder.
+
+2. **Attribution**: All copies or substantial portions of the Software must
+   retain the above copyright notice, this list of conditions, and the
+   following disclaimer.
+
+3. **No Warranty**: THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+   EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+   USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+**Why this license?** This license is inspired by the "fair-code" / Sustainable
+Use model (e.g., n8n, GitLab EE). It keeps the source visible and self-hostable
+for anyone, while protecting against direct commercial exploitation by hosted
+competitors. It is NOT a pure permissive open-source license — it adds a
+single use restriction: don't offer this exact service commercially without
+permission. This balances openness with the ability to sustain the project.

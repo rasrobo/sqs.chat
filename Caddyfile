@@ -1,0 +1,9 @@
+sqs.chat {
+    reverse_proxy web:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    encode zstd gzip
+}
