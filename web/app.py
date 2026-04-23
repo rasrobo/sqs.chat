@@ -843,7 +843,23 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SQS Signal</title>
+    <title>SQS Signal — Self-Hosted Open Source Dictation App | Speech to Text with Whisper</title>
+    <meta name="description" content="SQS Signal is a self-hosted, open-source dictation app powered by Whisper. Turn speech into text faster than typing. Privacy-first, CPU-friendly, and free to self-host.">
+    <meta property="og:title" content="SQS Signal — Self-Hosted Open Source Dictation App">
+    <meta property="og:description" content="Speak your draft faster than you'd type it. Open-source speech-to-text dictation powered by Whisper, self-hosted for privacy.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://sqs.chat">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="SQS Signal — Self-Hosted Dictation App">
+    <meta name="twitter:description" content="Open-source speech-to-text dictation powered by Whisper. Self-hosted, CPU-friendly, privacy-first.">
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-7KGKH11K48"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-7KGKH11K48');
+    </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -895,12 +911,42 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
         .footer { margin-top: 2rem; color: #444; font-size: 0.8rem; }
         .footer a { color: #6366f1; text-decoration: none; }
         .footer a:hover { text-decoration: underline; }
+        .oss-note { color: #52525b; font-size: 0.8rem; margin-top: 1.5rem; line-height: 1.5; }
+        .oss-note a { color: #6366f1; text-decoration: none; }
+        .oss-note a:hover { text-decoration: underline; }
+        .hero-line { font-size: 1.3rem; font-weight: 600; color: #e0e0e0; margin-bottom: 1rem; line-height: 1.5; }
+        .badge-row { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin: 1rem 0; }
+        .badge { font-size: 0.75rem; padding: 0.3rem 0.75rem; border-radius: 999px; border: 1px solid #27272a; color: #a1a1aa; background: #111; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="logo">SQS <span>Signal</span></div>
-        <p class="tagline">A self-hosted speech-to-text transcription service with live microphone capture and file upload support, powered by Whisper AI.</p>
+        <p class="tagline">self-hosted dictation &middot; open source &middot; powered by Whisper</p>
+        <div class="hero-line">Speak your draft faster than you'd type it.</div>
+
+        <div class="section">
+            <p style="color:#a1a1aa;font-size:0.9rem;line-height:1.6;margin-bottom:1rem;">
+                SQS Signal is an <strong>open-source dictation app</strong> that turns speech into text using
+                <a href="https://github.com/openai/whisper" style="color:#6366f1;">OpenAI Whisper</a>.
+                Self-host it for full privacy and control — no cloud dependency, no data leakage.
+            </p>
+            <div class="badge-row">
+                <span class="badge">open source</span>
+                <span class="badge">self-hosted</span>
+                <span class="badge">speech-to-text</span>
+                <span class="badge">Whisper</span>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Why dictation?</h2>
+            <p>
+                Speaking is often faster than typing — 2-3x faster for rough drafts, meeting notes,
+                code comments, and brain-dumping ideas. SQS Signal gives you a simple, private way
+                to do that on your own hardware.
+            </p>
+        </div>
 
         <div class="section">
             <h2>Architecture</h2>
@@ -929,7 +975,7 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
 
         <div class="section">
             <p style="color:#a1a1aa;font-size:0.9rem;line-height:1.6;margin-bottom:1rem;">
-                Transcription requires sign-in. Choose your mode:
+                Sign in with GitHub to start dictating. Choose your mode:
             </p>
             <ul>
                 <li><strong>Mic mode</strong> — Record short clips (5-20s ideal) for quick CPU notes</li>
@@ -947,6 +993,16 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
                 <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
                 Sign in with GitHub
             </a>
+        </div>
+        <div class="oss-note">
+            <p style="color:#52525b;font-size:0.8rem;margin:1rem 0 0.5rem;">
+                Open-source stack:
+                <a href="https://github.com/openai/whisper" style="color:#6366f1;">OpenAI Whisper</a> &middot;
+                <a href="https://github.com/ggml-org/whisper.cpp" style="color:#6366f1;">whisper.cpp</a> compat &middot;
+                <a href="https://github.com/SYSTRAN/faster-whisper" style="color:#6366f1;">faster-whisper</a> compat &middot;
+                <a href="https://github.com/fastapi/fastapi" style="color:#6366f1;">FastAPI</a> &middot;
+                <a href="https://github.com/caddyserver/caddy" style="color:#6366f1;">Caddy</a>
+            </p>
         </div>
         <div class="support">
             <p>Support development:</p>
@@ -970,7 +1026,21 @@ LANDING_PAGE_SIGNED_IN = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SQS Signal</title>
+    <title>SQS Signal — Self-Hosted Open Source Dictation App | Speech to Text with Whisper</title>
+    <meta name="description" content="Live dictation using Whisper speech-to-text. SQS Signal is an open-source, self-hosted dictation app for turning speech into text.">
+    <meta property="og:title" content="SQS Signal — Self-Hosted Open Source Dictation App">
+    <meta property="og:description" content="Open-source self-hosted dictation. Speak your draft faster than you'd type it.">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="SQS Signal — Self-Hosted Dictation App">
+    <meta name="twitter:description" content="Open-source speech-to-text dictation powered by Whisper. Self-hosted, CPU-friendly, privacy-first.">
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-7KGKH11K48"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-7KGKH11K48');
+    </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -1068,7 +1138,18 @@ SIGNIN_PAGE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign in - SQS Signal</title>
+    <title>Sign in — SQS Signal Dictation | Self-Hosted Speech to Text</title>
+    <meta name="description" content="Sign in to SQS Signal, the self-hosted open-source dictation app powered by Whisper speech-to-text.">
+    <meta property="og:title" content="SQS Signal — Self-Hosted Open Source Dictation App">
+    <meta property="og:description" content="Open-source self-hosted dictation. Sign in to start turning speech into text.">
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-7KGKH11K48"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-7KGKH11K48');
+    </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
@@ -1089,7 +1170,7 @@ SIGNIN_PAGE = """<!DOCTYPE html>
 <body>
     <div class="card">
         <h1>Sign in</h1>
-        <p class="subtitle">to SQS Signal transcription service</p>
+        <p class="subtitle">to SQS Signal dictation service</p>
 
         <a href="/auth/github" class="github-btn">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -1106,7 +1187,20 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SQS Signal</title>
+    <title>SQS Signal — Live Dictation | Self-Hosted Speech to Text</title>
+    <meta name="description" content="Live dictation using Whisper speech-to-text. SQS Signal is an open-source, self-hosted dictation app for turning speech into text.">
+    <meta property="og:title" content="SQS Signal — Live Dictation App">
+    <meta property="og:description" content="Open-source self-hosted dictation. Speak your draft faster than you'd type it.">
+    <meta name="twitter:title" content="SQS Signal — Live Dictation">
+    <meta name="twitter:description" content="Self-hosted open-source dictation powered by Whisper speech-to-text.">
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-7KGKH11K48"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-7KGKH11K48');
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1334,7 +1428,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     <span class="caption-text" id="caption-text"></span>
                     <span class="caption-cursor">|</span>
                 </div>
-                <div class="live-text empty" id="live-text"><strong>Mic:</strong> Quick notes (5-20s). <strong>Upload:</strong> Longer/higher-quality audio.</div>
+                <div class="live-text empty" id="live-text"><strong>Mic:</strong> Quick dictation clips (5-20s). <strong>Upload:</strong> Longer/higher-quality audio.</div>
                 <div class="live-meta" id="live-meta"></div>
             </div>
             <div class="result-panel" id="result-panel">
@@ -1985,7 +2079,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); };
         window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var blob = new Blob([text], { type: 'text/plain' }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript.txt'; a.click(); URL.revokeObjectURL(url); };
-        window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live captions. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
+        window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
             var overlay = document.getElementById("help-overlay");
