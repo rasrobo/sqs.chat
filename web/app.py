@@ -481,11 +481,11 @@ class LiveTranscriber:
 
     def add_chunk(self, data: bytes):
         with self.lock:
-            pcm = data[44:] if len(data) > 44 and data[:4] == b"RIFF" else data
-            self.audio_buffer.extend(pcm)
-            if len(self.audio_buffer) > self.max_buffer_sec * self.pcm_rate * 2:
-                excess = len(self.audio_buffer) - self.max_buffer_sec * self.pcm_rate * 2
-                del self.audio_buffer[:excess]
+            self.audio_buffer.extend(data)
+            # Cap buffer at 60 seconds to avoid OOM
+            max_bytes = 60 * self.pcm_rate * 2
+            if len(self.audio_buffer) > max_bytes:
+                del self.audio_buffer[:len(self.audio_buffer) - max_bytes]
             self.chunk_count += 1
 
     def get_buffer(self) -> bytes:
@@ -542,6 +542,10 @@ def decode_webm_to_wav(webm_data: bytes, output_path: str) -> bool:
         if result.returncode != 0:
             print(f"[FFmpeg] Error decoding WebM: {result.stderr.decode()[:200]}", flush=True)
             return False
+        # Validate the output WAV has actual audio content
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 100:
+            print(f"[FFmpeg] Decoded WAV too small or missing: {os.path.getsize(output_path) if os.path.exists(output_path) else 0} bytes", flush=True)
+            return False
         return True
     except Exception as e:
         print(f"[FFmpeg] Exception decoding WebM: {e}", flush=True)
@@ -563,29 +567,22 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
     window_len = len(audio)
     is_stopped = transcriber.is_stopped()
 
-    approx_window_duration = window_len / (transcriber.pcm_rate * 2)
-    approx_total_duration = total_buffer_len / (transcriber.pcm_rate * 2)
+    approx_window_duration = window_len / (transcriber.pcm_rate * 2) if window_len > 0 else 0.0
+    approx_total_duration = total_buffer_len / (transcriber.pcm_rate * 2) if total_buffer_len > 0 else 0.0
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] transcribe_buffer: total={total_buffer_len} bytes (~{approx_total_duration:.1f}s), window={window_len} bytes (~{approx_window_duration:.1f}s), is_stopped={is_stopped}", flush=True)
 
     # Guardrail: reject empty or tiny audio
-    if len(audio) < 44:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] GUARDRAIL: audio too small ({len(audio)} bytes < 44), skipping", flush=True)
+    if len(audio) < 100:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] GUARDRAIL: audio too small ({len(audio)} bytes < 100), skipping", flush=True)
         if is_stopped:
             import traceback
             print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] GUARDRAIL: final transcription got tiny audio - try speaking again\n{traceback.format_stack()[-3]}", flush=True)
         transcriber.set_transcribing(False)
         return
 
-    # Log audio amplitude for debugging
-    if len(audio) >= 2:
-        try:
-            samples = struct.unpack(f"<{min(len(audio)//2, 16000)}h", audio[:min(len(audio)//2, 16000)*2])
-            max_amp = max(abs(s) for s in samples) if samples else 0
-            rms = (sum(s*s for s in samples) / len(samples)) ** 0.5 if samples else 0
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Audio level: max={max_amp} rms={rms:.1f}", flush=True)
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Level check failed: {e}", flush=True)
+    # Log buffer info for debugging
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer size: {len(audio)} bytes, first 8 hex: {audio[:8].hex()}", flush=True)
 
     # Energy check for live (not stopped) — skip silent buffers
     if not is_stopped and len(audio) >= 2:
@@ -605,15 +602,37 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
         return
 
     tmp_wav = os.path.join(transcriber.tmp_dir, f"chunk_{uuid.uuid4()}.wav")
+    decoded_ok = False
     try:
-        pcm_to_wav_file(audio, tmp_wav)
+        decoded_ok = decode_webm_to_wav(audio, tmp_wav)
+        if not decoded_ok:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] WebM decode failed, falling back to raw PCM", flush=True)
+            pcm_to_wav_file(audio, tmp_wav)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Write audio failed: {e}")
         transcriber.set_transcribing(False)
         return
 
+    # Validate decoded WAV has content
     try:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Calling Whisper service with {len(audio)} bytes audio", flush=True)
+        decoded_size = os.path.getsize(tmp_wav)
+        if decoded_size < 100:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Decoded WAV too small ({decoded_size} bytes), skipping transcription", flush=True)
+            if is_stopped:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Audio decode produced no output - try a slightly longer recording", flush=True)
+                try:
+                    await transcriber.ws.send_json({"type": "error", "message": "No speech detected. Try recording slightly longer."})
+                except:
+                    pass
+            transcriber.set_transcribing(False)
+            return
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] WAV validation failed: {e}", flush=True)
+        transcriber.set_transcribing(False)
+        return
+
+    try:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Calling Whisper service with {len(audio)} raw bytes (decoded WAV: {decoded_size} bytes)", flush=True)
         async with httpx.AsyncClient(timeout=30.0) as client:
             with open(tmp_wav, "rb") as f:
                 form_data = {"file": ("audio.wav", f, "audio/wav")}
@@ -671,7 +690,8 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
     except httpx.TimeoutException:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Whisper timeout after 30s", flush=True)
         elapsed = _time.time() - transcribe_start
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={approx_window_duration:.1f} transcribe_sec={elapsed:.1f} realtime_ratio={elapsed/approx_window_duration:.2f} result_len=0 result=timeout", flush=True)
+        safe_dur = approx_window_duration if approx_window_duration > 0 else 0.5
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={safe_dur:.1f} transcribe_sec={elapsed:.1f} realtime_ratio={elapsed/safe_dur:.2f} result_len=0 result=timeout", flush=True)
         try:
             await transcriber.ws.send_json({
                 "type": "error",
@@ -684,7 +704,8 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Transcribe error: {e}", flush=True)
         elapsed = _time.time() - transcribe_start
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={approx_window_duration:.1f} transcribe_sec={elapsed:.1f} realtime_ratio={elapsed/approx_window_duration:.2f} result_len=0 result=error:{str(e)[:50]}", flush=True)
+        safe_dur = approx_window_duration if approx_window_duration > 0 else 0.5
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={safe_dur:.1f} transcribe_sec={elapsed:.1f} realtime_ratio={elapsed/safe_dur:.2f} result_len=0 result=error:{str(e)[:50]}", flush=True)
         try:
             await transcriber.ws.send_json({
                 "type": "error",
@@ -754,8 +775,22 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
                         stop_start = _t.time()
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Stop received", flush=True)
                         full_buffer = transcriber.get_buffer()
-                        full_duration = len(full_buffer) / 32000.0
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer: {len(full_buffer)} bytes ({full_duration:.2f}s total), transcribing FULL buffer", flush=True)
+                        buffer_len = len(full_buffer)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer: {buffer_len} bytes, transcribing FULL buffer", flush=True)
+
+                        # Guard: if no audio data received, inform user and exit gracefully
+                        if buffer_len < 100:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer too small ({buffer_len} bytes), skipping transcription", flush=True)
+                            transcriber.mark_stopped()
+                            await websocket.send_json({
+                                "type": "done",
+                                "text": "",
+                                "model": "tiny.en",
+                                "language": transcriber.language,
+                            })
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Done message sent (empty buffer), breaking WS loop", flush=True)
+                            break
+
                         transcriber.mark_stopped()
                         transcriber.set_transcribing(True)
                         t = LiveTranscriber(websocket, transcriber.language)
@@ -765,14 +800,15 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
                         t.tmp_dir = transcriber.tmp_dir
                         t.mark_stopped()
                         transcriber.last_transcribe_time = _t.time()
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Starting final transcription (FULL buffer: {full_duration:.1f}s, fast mode: beam_size=1)...", flush=True)
                         transcribe_start = _t.time()
                         result = await run_transcribe(t, 0)
                         transcribe_elapsed = _t.time() - transcribe_start
                         total_elapsed = _t.time() - stop_start
+                        # Approximate duration from decoded result; fall back to buffer size guess
+                        approx_secs = max(buffer_len / 32000.0, 0.5)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Transcribe result: '{result}' (len={len(result) if result else 0})", flush=True)
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Timing: {transcribe_elapsed:.1f}s transcription, {total_elapsed:.1f}s total ({transcribe_elapsed/full_duration:.1f}x realtime for {full_duration:.1f}s window)", flush=True)
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={full_duration:.1f} transcribe_sec={transcribe_elapsed:.1f} realtime_ratio={transcribe_elapsed/full_duration:.2f} result_len={len(result) if result else 0} result=success", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Timing: {transcribe_elapsed:.1f}s transcription, {total_elapsed:.1f}s total ({transcribe_elapsed/approx_secs:.1f}x realtime for ~{approx_secs:.1f}s window)", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={approx_secs:.1f} transcribe_sec={transcribe_elapsed:.1f} realtime_ratio={transcribe_elapsed/approx_secs:.2f} result_len={len(result) if result else 0} result=success", flush=True)
                         await websocket.send_json({
                             "type": "done",
                             "text": result or transcriber.last_transcript or "",
@@ -783,11 +819,13 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
                         break
                     elif msg_type == "flush":
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Flush received (sending listening indicator)", flush=True)
+                        flush_buf = len(transcriber.get_buffer())
+                        flush_secs = flush_buf / 32000.0
                         try:
                             await websocket.send_json({
                                 "type": "listening",
                                 "chunk": transcriber.chunk_count,
-                                "buffer_seconds": len(transcriber.get_buffer()) / 32000.0
+                                "buffer_seconds": flush_secs
                             })
                         except:
                             pass
@@ -1634,7 +1672,6 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         var chunks = [], silenceTimeout = 15000, lastSpeechTime = 0;
         var speechThreshold = 0.025, checkInterval = null, meterInterval = null;
         var elapsedSeconds = 0, elapsedInterval = null;
-        var pcmChunks = [], pcmSampleRate = 16000;
         var sendInterval = null;
 
         function updateMeter() {
@@ -1865,29 +1902,15 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             if (sendInterval) return;
             var flushCounter = 0;
             sendInterval = setInterval(function() {
-                if (pcmChunks.length > 0 && ws && wsConnected && ws.readyState === WebSocket.OPEN) {
-                    var chunksCopy = pcmChunks.slice();
-                    var wavBlob = pcmChunksToWav(chunksCopy, pcmSampleRate);
-                    // Send if we have meaningful audio (0.5s = 16000 bytes PCM)
-                    if (wavBlob.size > 16000) {
-                        pcmChunks = [];
+                if (chunks.length > 0 && ws && wsConnected && ws.readyState === WebSocket.OPEN) {
+                    var chunksCopy = chunks.slice();
+                    chunks = [];
+                    var webmBlob = new Blob(chunksCopy, { type: 'audio/webm' });
+                    if (webmBlob.size > 1000) {
                         try { 
-                            ws.send(wavBlob); 
-                            debug('info', 'Interval sent ' + wavBlob.size + ' bytes, chunks=' + chunksCopy.length); 
-                            
-                            // Send flush message every 3 intervals (every 1.5 seconds) to trigger partial transcription
-                            flushCounter++;
-                            if (flushCounter >= 3) {
-                                flushCounter = 0;
-                                try {
-                                    ws.send(JSON.stringify({ type: "flush" }));
-                                    debug('info', 'Flush message sent');
-                                } catch(e) {
-                                    debug('error', 'Flush send error: ' + e.message);
-                                }
-                            }
+                            ws.send(webmBlob); 
                         }
-                        catch(e) { debug('error', 'Interval send error: ' + e.message); pcmChunks = chunksCopy.concat(pcmChunks); }
+                        catch(e) { debug('error', 'Interval send error: ' + e.message); chunks = chunksCopy.concat(chunks); }
                     }
                 }
             }, 500);
@@ -1895,26 +1918,6 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         function stopSendInterval() {
             if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
-        }
-
-        function pcmChunksToWav(chunks, sampleRate) {
-            var maxLen = 0;
-            for (var i = 0; i < chunks.length; i++) maxLen += chunks[i].length;
-            var buffer = new ArrayBuffer(44 + maxLen * 2);
-            var view = new DataView(buffer);
-            var offset = 0;
-            function writeStr(s) { for (var i = 0; i < s.length; i++) { view.setUint8(offset + i, s.charCodeAt(i)); } offset += s.length; }
-            writeStr('RIFF'); view.setUint32(offset, 36 + maxLen * 2, true); offset += 4;
-            writeStr('WAVE'); writeStr('fmt '); view.setUint32(offset, 16, true); offset += 4;
-            view.setUint16(offset, 1, true); offset += 2;
-            view.setUint16(offset, 1, true); offset += 2;
-            view.setUint32(offset, sampleRate, true); offset += 4;
-            view.setUint32(offset, sampleRate * 2, true); offset += 4;
-            view.setUint16(offset, 2, true); offset += 2;
-            view.setUint16(offset, 16, true); offset += 2;
-            writeStr('data'); view.setUint32(offset, maxLen * 2, true); offset += 4;
-            for (var i = 0; i < chunks.length; i++) { for (var j = 0; j < chunks[i].length; j++) { view.setInt16(offset, chunks[i][j] * 32767, true); offset += 2; } }
-            return new Blob([buffer], { type: 'audio/wav' });
         }
 
         function startRecording() {
@@ -1942,7 +1945,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 analyser.fftSize = 256;
                 source.connect(analyser);
                 var scriptProc = audioContext.createScriptProcessor(4096, 1, 1);
-                scriptProc.onaudioprocess = function(e) { if (!isRecording) return; var pcmData = e.inputBuffer.getChannelData(0); pcmChunks.push(new Float32Array(pcmData)); lastSpeechTime = Date.now(); if (pcmChunks.length <= 3) { var peak = 0; for (var k = 0; k < pcmData.length; k++) { var v = Math.abs(pcmData[k]); if (v > peak) peak = v; } debug('info', 'PCM peak=' + peak.toFixed(4)); } };
+                scriptProc.onaudioprocess = function(e) { if (!isRecording) return; lastSpeechTime = Date.now(); };
                 source.connect(scriptProc); scriptProc.connect(audioContext.destination);
                 chunks = [];
                 recorder = new MediaRecorder(stream, { mimeType: mimeType || undefined });
@@ -1952,7 +1955,6 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 lastSpeechTime = Date.now();
                 isRecording = true;
                 elapsedSeconds = 0;
-                pcmChunks = [];
                 startMeter();
                 checkInterval = setInterval(detectSpeech, 100);
                 elapsedInterval = setInterval(function() { 
@@ -1996,7 +1998,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             
             // Update UI immediately
             setMicButtonState('processing', 'Processing...');
-            setStatus('processing', 'Processing transcript...', 'Audio length: ' + Math.round(pcmChunks.length * 500 / 1000) + 's');
+            setStatus('processing', 'Processing transcript...', 'Audio length: ~' + chunks.length * 2 + 's');
             // Show processing in caption line
             captionLine.style.display = 'flex';
             captionText.textContent = 'Processing...';
@@ -2006,13 +2008,14 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             if (recorder && recorder.state === "recording") recorder.stop();
             if (wsRef && wsConnRef && wsRef.readyState === WebSocket.OPEN) {
                 stopSendInterval();
-                // Send ALL accumulated pcmChunks as one final blob
-                var wavBlob = pcmChunksToWav(pcmChunks, pcmSampleRate);
-                debug("info", "Final audio blob size: " + wavBlob.size + " pcmChunks=" + pcmChunks.length + " wsState=" + wsRef.readyState);
-                // Always send final audio when stopping, even if small
-                if (wavBlob.size > 0) {
-                    try { wsRef.send(wavBlob); debug('info', 'Final audio sent (' + wavBlob.size + ' bytes)'); }
-                    catch(e) { debug('error', 'Final send error: ' + e.message); }
+                // Send any remaining WebM chunks as final blob
+                if (chunks.length > 0) {
+                    var finalBlob = new Blob(chunks, { type: 'audio/webm' });
+                    debug("info", "Final audio blob size: " + finalBlob.size + " chunks=" + chunks.length + " wsState=" + wsRef.readyState);
+                    if (finalBlob.size > 0) {
+                        try { wsRef.send(finalBlob); debug('info', 'Final audio sent (' + finalBlob.size + ' bytes)'); }
+                        catch(e) { debug('error', 'Final send error: ' + e.message); }
+                    }
                 }
                 try { wsRef.send(JSON.stringify({ type: "stop" })); debug('info', 'Stop msg sent'); }
                 catch(e) { debug('error', 'Stop send error: ' + e.message); }
