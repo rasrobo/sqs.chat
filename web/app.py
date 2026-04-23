@@ -405,17 +405,19 @@ async def auth_github_callback(request: Request, code: str, state: str):
 
 
 @app.get("/auth/github/status")
-async def auth_github_status(user: dict = Depends(get_current_user)):
-    mic = get_mic_usage(user["user_id"]) if user.get("user_id") else {"used": 0, "remaining": 0, "limit": MIC_DAILY_LIMIT_SECONDS}
+async def auth_github_status(user: dict = Depends(optional_user)):
+    if not user:
+        return {"authenticated": False}
+    used = get_mic_usage(user["user_id"]) if user.get("user_id") else 0
     return {
         "authenticated": True,
         "user_id": user.get("user_id", ""),
         "username": user.get("username", ""),
         "avatar_url": user.get("avatar_url", ""),
         "auth_method": user.get("auth_method", ""),
-        "mic_used_seconds": mic["used"],
-        "mic_remaining_seconds": mic["remaining"],
-        "mic_limit_seconds": mic["limit"],
+        "mic_used_seconds": used,
+        "mic_remaining_seconds": max(0, MIC_DAILY_LIMIT_SECONDS - used),
+        "mic_limit_seconds": MIC_DAILY_LIMIT_SECONDS,
     }
 
 
