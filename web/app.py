@@ -617,11 +617,10 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
     try:
         decoded_size = os.path.getsize(tmp_wav)
         if decoded_size < 100:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Decoded WAV too small ({decoded_size} bytes), skipping transcription", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] REJECT: decoded WAV too small ({decoded_size} bytes), skipping", flush=True)
             if is_stopped:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Audio decode produced no output - try a slightly longer recording", flush=True)
                 try:
-                    await transcriber.ws.send_json({"type": "error", "message": "No speech detected. Try recording slightly longer."})
+                    await transcriber.ws.send_json({"type": "error", "message": "Recording too short. Please record for at least 1 second."})
                 except:
                     pass
             transcriber.set_transcribing(False)
@@ -630,6 +629,34 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] WAV validation failed: {e}", flush=True)
         transcriber.set_transcribing(False)
         return
+
+    # Silence detection: check PCM amplitude from decoded WAV (works for stopped path too)
+    try:
+        with wave.open(tmp_wav, "rb") as wf:
+            frames = wf.readframes(wf.getnframes())
+            if len(frames) >= 2:
+                samples = struct.unpack(f"<{len(frames)//2}h", frames[:len(frames)//2*2])
+                max_amp = max(abs(s) for s in samples)
+                decoded_dur = wf.getnframes() / wf.getframerate()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Decoded WAV: {decoded_size} bytes, ~{decoded_dur:.1f}s, max_amp={max_amp}", flush=True)
+                if max_amp < 500:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] REJECT: silence detected (max_amp={max_amp} < 500)", flush=True)
+                    transcriber.set_transcribing(False)
+                    try:
+                        await transcriber.ws.send_json({"type": "error", "message": "No speech detected. Please speak louder or check your microphone."})
+                    except:
+                        pass
+                    return
+                if decoded_dur < 0.5:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] REJECT: too short ({decoded_dur:.2f}s < 0.5s)", flush=True)
+                    transcriber.set_transcribing(False)
+                    try:
+                        await transcriber.ws.send_json({"type": "error", "message": "Recording too short. Please record for at least 1 second."})
+                    except:
+                        pass
+                    return
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] WAV amplitude check failed: {e}", flush=True)
 
     try:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Calling Whisper service with {len(audio)} raw bytes (decoded WAV: {decoded_size} bytes)", flush=True)
@@ -672,6 +699,20 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
                         break
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Whisper result: '{text}' (len={len(text)}, is_stopped={is_stopped})", flush=True)
+
+        # Post-transcription check: reject blank/whitespace-only results
+        if is_stopped and not text.strip():
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] REJECT: empty transcript from Whisper", flush=True)
+            try:
+                await transcriber.ws.send_json({"type": "error", "message": "No speech detected. Try speaking louder or check your microphone."})
+            except:
+                pass
+            transcriber.set_transcribing(False)
+            import os as _os
+            if _os.path.exists(tmp_wav):
+                try: _os.unlink(tmp_wav)
+                except: pass
+            return
 
         msg = {
             "type": "final" if is_stopped else "partial",
@@ -780,15 +821,12 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
 
                         # Guard: if no audio data received, inform user and exit gracefully
                         if buffer_len < 100:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Buffer too small ({buffer_len} bytes), skipping transcription", flush=True)
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] REJECT: buffer too small ({buffer_len} bytes), skipping", flush=True)
                             transcriber.mark_stopped()
-                            await websocket.send_json({
-                                "type": "done",
-                                "text": "",
-                                "model": "tiny.en",
-                                "language": transcriber.language,
-                            })
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Done message sent (empty buffer), breaking WS loop", flush=True)
+                            try:
+                                await websocket.send_json({"type": "error", "message": "Recording too short. Please record for at least 1 second."})
+                            except:
+                                pass
                             break
 
                         transcriber.mark_stopped()
@@ -809,13 +847,22 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Transcribe result: '{result}' (len={len(result) if result else 0})", flush=True)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Timing: {transcribe_elapsed:.1f}s transcription, {total_elapsed:.1f}s total ({transcribe_elapsed/approx_secs:.1f}x realtime for ~{approx_secs:.1f}s window)", flush=True)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={approx_secs:.1f} transcribe_sec={transcribe_elapsed:.1f} realtime_ratio={transcribe_elapsed/approx_secs:.2f} result_len={len(result) if result else 0} result=success", flush=True)
-                        await websocket.send_json({
-                            "type": "done",
-                            "text": result or transcriber.last_transcript or "",
-                            "model": "tiny.en",
-                            "language": transcriber.language,
-                        })
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Done message sent, breaking WS loop", flush=True)
+                        # Post-stop blank check: if transcription produced no meaningful text, send error
+                        final_text = (result or transcriber.last_transcript or "").strip()
+                        if not final_text:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] REJECT: final transcription empty, sending error to user", flush=True)
+                            try:
+                                await websocket.send_json({"type": "error", "message": "No speech detected. Try speaking louder or recording longer."})
+                            except:
+                                pass
+                        else:
+                            await websocket.send_json({
+                                "type": "done",
+                                "text": final_text,
+                                "model": "tiny.en",
+                                "language": transcriber.language,
+                            })
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Done message sent", flush=True)
                         break
                     elif msg_type == "flush":
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Flush received (sending listening indicator)", flush=True)
@@ -1665,6 +1712,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         var isRecording = false;
         var isStopping = false;
+        var isClientRejected = false;
         var ws = null, wsConnected = false, wsLanguage = 'en';
         var finalSegments = [], accumulatedText = '', lastPartialText = '', captionUpdateThrottle = null;
         var wsDoneFlag = false, wsDoneTimeout = null;
@@ -1837,8 +1885,9 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 debug('error', 'WS error: ' + data.message);
                 wsDoneFlag = true;
                 if (wsDoneTimeout) { clearTimeout(wsDoneTimeout); wsDoneTimeout = null; }
-                setStatus('error', 'Error', data.message);
+                setStatus('error', 'Recording too short', data.message);
                 clearCaptionLine();
+                showToast(data.message || 'Recording issue');
                 if (ws && ws.readyState < 2) { ws.close(); ws = null; wsConnected = false; }
                     cleanupRecording('error');
             }
@@ -1994,6 +2043,24 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         function stopRecording() {
             debug("info", "Stop recording called");
             if (isStopping) { debug("info", "Already stopping, ignoring"); return; }
+            
+            // Minimum recording duration guard: reject sub-second recordings client-side
+            if (chunks.length < 2) {
+                debug("warn", "Recording too short (chunks=" + chunks.length + "), rejecting");
+                isStopping = true;
+                isClientRejected = true;
+                setStatus('error', 'Recording too short', 'Please record for at least 1 second.');
+                showToast('Recording too short — hold mic button longer');
+                setTimeout(function() {
+                    isStopping = false;
+                    isClientRejected = false;
+                    cleanupRecording('error');
+                }, 1500);
+                if (recorder && recorder.state === "recording") recorder.stop();
+                if (ws && wsConnected && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; wsConnected = false; }
+                return;
+            }
+            
             isStopping = true;
             
             // Update UI immediately
@@ -2048,6 +2115,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         function cleanupRecording(finalState) {
             isRecording = false;
             isStopping = false;
+            isClientRejected = false;
             stopMeter();
             if (checkInterval) { clearInterval(checkInterval); checkInterval = null; }
             if (elapsedInterval) { clearInterval(elapsedInterval); elapsedInterval = null; }
@@ -2071,7 +2139,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         function onRecorderStop() {
             debug('info', 'Recorder stopped, chunks=' + chunks.length);
-            if (wsDoneFlag) return;
+            if (wsDoneFlag || isClientRejected) return;
             if (chunks.length === 0 && (!accumulatedText && finalSegments.length === 0)) { debug('error', 'No audio captured'); setStatus('error', 'No audio', 'Try again'); showToast('No audio captured'); return; }
             finalizeToResult();
         }
