@@ -1,5 +1,11 @@
+# Private environment files (keep secrets out)
 .env
-.env.*
+.env.local
+.env.production
+.env.development
+
+# Allow example env files (no secrets)
+# .env.example is tracked
 uploads/
 __pycache__/
 *.pyc
