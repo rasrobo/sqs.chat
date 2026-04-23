@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
@@ -50,7 +50,6 @@ app.add_middleware(
 )
 
 WHISPER_SERVICE_URL = os.getenv("WHISPER_SERVICE_URL", "http://whisper-service:8000")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")  # LEGACY - will be removed
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback")
@@ -132,7 +131,7 @@ def init_db():
     conn.close()
 
 
-def create_session(user_id=None, username=None, avatar_url=None, auth_method="pat", remember=False):
+def create_session(user_id=None, username=None, avatar_url=None, auth_method="github", remember=False):
     session_id = secrets.token_urlsafe(32)
     expires_at = datetime.utcnow() + timedelta(seconds=SESSION_MAX_AGE_REMEMBER if remember else SESSION_MAX_AGE_SHORT)
     conn = get_db()
@@ -290,7 +289,7 @@ def record_mic_usage(user_id, seconds):
     conn.close()
 
 
-async def get_current_user(request: Request, x_auth_token: str = Header(None)):
+async def get_current_user(request: Request):
     cookie_val = request.cookies.get(SESSION_COOKIE_NAME)
     if cookie_val:
         session_id = verify_cookie_value(cookie_val)
@@ -301,16 +300,14 @@ async def get_current_user(request: Request, x_auth_token: str = Header(None)):
                     "user_id": session.get("user_id", ""),
                     "username": session.get("username", ""),
                     "avatar_url": session.get("avatar_url", ""),
-                    "auth_method": session.get("auth_method", "pat"),
+                    "auth_method": session.get("auth_method", "github"),
                 }
-    if x_auth_token and AUTH_TOKEN and x_auth_token == AUTH_TOKEN:
-        return {"user_id": "", "username": "legacy", "avatar_url": "", "auth_method": "token"}
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def optional_user(request: Request, x_auth_token: str = Header(None)):
+async def optional_user(request: Request):
     try:
-        return await get_current_user(request, x_auth_token)
+        return await get_current_user(request)
     except HTTPException:
         return None
 
@@ -332,7 +329,6 @@ async def health():
         "status": "healthy",
         "version": "2.0.0",
         "github_oauth_configured": bool(GITHUB_CLIENT_ID),
-        "legacy_token_auth_configured": bool(AUTH_TOKEN),
     }
 
 
@@ -346,26 +342,7 @@ async def signin(request: Request):
     return HTMLResponse(SIGNIN_PAGE)
 
 
-@app.post("/signin")
-async def signin_post(request: Request, response: Response, token: str = Form(...), remember: str = Form("0")):
-    remember_bool = remember == "1"
-    if not AUTH_TOKEN or token != AUTH_TOKEN:
-        error_html = SIGNIN_PAGE.replace(
-            "</form>",
-            "</form><p class=\"error\" id=\"error-msg\" style=\"display:block\">Invalid token. Please try again.</p>"
-        )
-        return HTMLResponse(error_html)
-    session_id, expires_at = create_session(user_id="", username="legacy", auth_method="token", remember=remember_bool)
-    max_age = SESSION_MAX_AGE_REMEMBER if remember_bool else SESSION_MAX_AGE_SHORT
-    cookie_val = make_cookie_value(session_id, remember_bool)
-    response = RedirectResponse(url="/app", status_code=303)
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME, value=cookie_val, path="/",
-        max_age=max_age, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE
-    )
-    ip = request.client.host if request.client else ""
-    log_access("", "legacy", "signin", "legacy token", ip)
-    return response
+
 
 
 @app.get("/auth/github")
@@ -382,8 +359,8 @@ async def auth_github_callback(request: Request, code: str, state: str):
     stored_state = request.cookies.get("oauth_state", "")
     if not stored_state or stored_state != state:
         return HTMLResponse(SIGNIN_PAGE.replace(
-            "</form>",
-            "</form><p class=\"error\" id=\"error-msg\" style=\"display:block\">State mismatch. Try again.</p>"
+            'class="back-link"',
+            'class="error" id="error-msg" style="display:block">State mismatch. Try again.</p><div class="back-link"'
         ))
     gh_user = await exchange_github_code(code)
     user_info = upsert_github_user(gh_user)
@@ -882,11 +859,8 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
         }
         .cta-btn:hover { background: #4f46e5; }
         .cta-btn svg { width: 20px; height: 20px; }
-        .legacy-link { color: #52525b; font-size: 0.85rem; }
-        .legacy-link a { color: #6366f1; text-decoration: none; }
-        .legacy-link a:hover { text-decoration: underline; }
-        .coffee { margin-top: 1.5rem; padding: 1rem; background: #141414; border: 1px solid #222; border-radius: 8px; }
-        .coffee p { color: #71717a; font-size: 0.85rem; }
+        .support { margin-top: 1.5rem; padding: 1rem; background: #141414; border: 1px solid #222; border-radius: 8px; }
+        .support p { color: #71717a; font-size: 0.85rem; }
         .footer { margin-top: 2rem; color: #444; font-size: 0.8rem; }
         .footer a { color: #6366f1; text-decoration: none; }
         .footer a:hover { text-decoration: underline; }
@@ -923,14 +897,17 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
         </div>
 
         <div class="section">
-            <h2>Features</h2>
+            <p style="color:#a1a1aa;font-size:0.9rem;line-height:1.6;margin-bottom:1rem;">
+                Transcription requires sign-in. Choose your mode:
+            </p>
             <ul>
-                <li>File upload transcription (audio/video, up to 50 MB)</li>
-                <li>Live microphone capture with CPU-friendly "record then transcribe" mode</li>
-                <li>15-minute daily mic quota per user</li>
-                <li>GitHub OAuth sign-in and legacy PAT auth</li>
-                <li>Language selection (English, Spanish, French, German, Italian, Portuguese, Russian, Japanese, Korean, Chinese, Auto-detect)</li>
-                <li>Anti-hallucination filtering for short audio clips</li>
+                <li><strong>Mic mode</strong> — Record short clips (5-20s ideal) for quick CPU notes</li>
+                <li><strong>Upload mode</strong> — Longer or higher-quality audio (up to 50 MB) using the better <code>small.en</code> model</li>
+            </ul>
+            <ul style="margin-top:0.75rem;">
+                <li>15-minute daily mic quota per user; upload is unlimited</li>
+                <li>Language selection (11 languages + auto-detect)</li>
+                <li>Anti-hallucination filtering for short clips</li>
             </ul>
         </div>
 
@@ -940,19 +917,17 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
                 Sign in with GitHub
             </a>
         </div>
-        <div class="legacy-link">
-            <a href="/signin">Legacy token sign-in</a> &mdash; will be removed
-        </div>
-
-        <div class="coffee">
-            <p>If you find this useful and want to support development:</p>
-            <p style="margin-top:0.5rem; color:#52525b;">TODO: Buy Me a Coffee link (find the real link at <a href="https://github.com/rasrobo/sqs.chat" style="color:#6366f1;">github.com/rasrobo/sqs.chat</a>)</p>
+        <div class="support">
+            <p>Support development:</p>
+            <p style="margin-top:0.5rem;"><a href="https://ko-fi.com/sidequeststudios" target="_blank" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e0e0e0;text-decoration:none;font-size:0.85rem;transition:all 0.15s;" onmouseover="this.style.borderColor='#6366f1'" onmouseout="this.style.borderColor='#3f3f46'">☕ Buy me a Ko-fi</a></p>
         </div>
 
         <div class="footer">
             <a href="https://github.com/rasrobo/sqs.chat">github.com/rasrobo/sqs.chat</a>
             &nbsp;&middot;&nbsp;
             <a href="https://sidequeststudios.xyz">sidequeststudios.xyz</a>
+            &nbsp;&middot;&nbsp;
+            <a href="https://ko-fi.com/sidequeststudios">Ko-fi</a>
         </div>
     </div>
 </body>
@@ -1007,8 +982,8 @@ LANDING_PAGE_SIGNED_IN = """<!DOCTYPE html>
         .section ul { list-style: none; padding: 0; }
         .section ul li::before { content: "> "; color: #6366f1; }
         .section ul li { margin-bottom: 0.4rem; }
-        .coffee { margin-top: 1.5rem; padding: 1rem; background: #141414; border: 1px solid #222; border-radius: 8px; }
-        .coffee p { color: #71717a; font-size: 0.85rem; }
+        .support { margin-top: 1.5rem; padding: 1rem; background: #141414; border: 1px solid #222; border-radius: 8px; }
+        .support p { color: #71717a; font-size: 0.85rem; }
         .footer { margin-top: 2rem; color: #444; font-size: 0.8rem; }
         .footer a { color: #6366f1; text-decoration: none; }
         .footer a:hover { text-decoration: underline; }
@@ -1033,22 +1008,23 @@ LANDING_PAGE_SIGNED_IN = """<!DOCTYPE html>
             <a href="/app" class="cta-btn">Go to App</a>
         </div>
         <div class="section">
-            <h2>Features</h2>
+            <h2>Transcription Modes</h2>
             <ul>
-                <li>File upload transcription (audio/video, up to 50 MB)</li>
-                <li>Live microphone capture with CPU-friendly "record then transcribe" mode</li>
-                <li>15-minute daily mic quota per user</li>
-                <li>Language selection</li>
+                <li><strong>Mic (record then transcribe)</strong> — Quick CPU notes, 5-20s ideal. 15 min/day quota.</li>
+                <li><strong>File upload</strong> — Longer audio/video files (up to 50 MB). Better quality model. Unlimited.</li>
+                <li><strong>Language selection</strong> — 11 languages supported</li>
             </ul>
         </div>
-        <div class="coffee">
-            <p>If you find this useful and want to support development:</p>
-            <p style="margin-top:0.5rem; color:#52525b;">TODO: Buy Me a Coffee link</p>
+        <div class="support">
+            <p>Support development:</p>
+            <p style="margin-top:0.5rem;"><a href="https://ko-fi.com/sidequeststudios" target="_blank" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:#27272a;border:1px solid #3f3f46;border-radius:8px;color:#e0e0e0;text-decoration:none;font-size:0.85rem;">☕ Buy me a Ko-fi</a></p>
         </div>
         <div class="footer">
             <a href="https://github.com/rasrobo/sqs.chat">github.com/rasrobo/sqs.chat</a>
             &nbsp;&middot;&nbsp;
             <a href="https://sidequeststudios.xyz">sidequeststudios.xyz</a>
+            &nbsp;&middot;&nbsp;
+            <a href="https://ko-fi.com/sidequeststudios">Ko-fi</a>
         </div>
     </div>
 </body>
@@ -1073,17 +1049,7 @@ SIGNIN_PAGE = """<!DOCTYPE html>
         .github-btn { display: flex; align-items: center; justify-content: center; gap: 0.5rem; width: 100%; padding: 0.875rem; border-radius: 8px; border: 1px solid #3f3f46; background: #1a1a1a; color: #fff; font-weight: 600; cursor: pointer; font-size: 1rem; text-decoration: none; transition: all 0.2s; }
         .github-btn:hover { background: #27272a; border-color: #6366f1; }
         .github-btn svg { width: 20px; height: 20px; }
-        .legacy-label { color: #52525b; font-size: 0.75rem; text-align: center; margin-bottom: 1rem; }
-        .form-group { margin-bottom: 1rem; }
-        label { display: block; margin-bottom: 0.5rem; color: #888; font-size: 0.875rem; }
-        input { width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #333; background: #1a1a1a; color: #fff; font-size: 1rem; box-sizing: border-box; }
-        input:focus { outline: none; border-color: #6366f1; }
-        .btn { width: 100%; padding: 0.875rem; border-radius: 8px; border: none; background: #6366f1; color: #fff; font-weight: 600; cursor: pointer; font-size: 1rem; margin-top: 1rem; transition: background 0.2s; }
-        .btn:hover { background: #4f46e5; }
         .error { color: #ef4444; font-size: 0.875rem; margin-top: 1rem; display: none; }
-        .checkbox-group { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; }
-        .checkbox-group input { width: auto; }
-        .checkbox-group label { margin: 0; color: #888; font-size: 0.875rem; }
         .back-link { text-align: center; margin-top: 1.5rem; }
         .back-link a { color: #52525b; text-decoration: none; font-size: 0.85rem; }
         .back-link a:hover { color: #6366f1; }
@@ -1099,31 +1065,8 @@ SIGNIN_PAGE = """<!DOCTYPE html>
             Sign in with GitHub
         </a>
 
-        <div class="divider">or</div>
-
-        <div class="legacy-label">Legacy access token (will be removed)</div>
-
-        <form id="login-form">
-            <div class="form-group"><label for="token">Access Token</label><input type="password" id="token" name="token" placeholder="Enter token" required></div>
-            <div class="checkbox-group"><input type="checkbox" id="remember" name="remember" value="1"><label for="remember">Remember this device</label></div>
-            <button type="submit" class="btn">Sign in with token</button>
-        </form>
-        <p class="error" id="error-msg">Invalid token. Please try again.</p>
         <div class="back-link"><a href="/">&larr; Back to home</a></div>
     </div>
-    <script>
-        document.getElementById("login-form").addEventListener("submit", function(e) {
-            e.preventDefault();
-            var token = document.getElementById("token").value;
-            var remember = document.getElementById("remember").checked ? "1" : "0";
-            var form = new URLSearchParams();
-            form.append("token", token);
-            form.append("remember", remember);
-            fetch("/signin", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() })
-            .then(function(res) { if (res.ok) { window.location.href = "/app"; } else { document.getElementById("error-msg").style.display = "block"; } })
-            .catch(function() { document.getElementById("error-msg").style.display = "block"; });
-        });
-    </script>
 </body>
 </html>"""
 
@@ -1260,8 +1203,37 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         .toast.show { opacity: 1; }
         @media (max-width: 640px) { .input-row { flex-direction: column; } .mic-btn { width: 100%; min-width: 0; flex-direction: row; padding: 0.75rem 1.5rem; } .mic-icon { width: auto; height: auto; } .status-dock { bottom: 1rem; right: 1rem; left: 1rem; min-width: 0; } .result-panel { margin-bottom: 80px; } }
         @media (prefers-reduced-motion: reduce) { .status-dot.active, .status-dot.recording, .status-dot.streaming, .mic-btn.recording, .live-dot { animation: none; } .mic-meter-bar { transition: none; } #bg-canvas { display: none; } }
-            .help-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid #3f3f46; background: transparent; color: #a1a1aa; cursor: pointer; font-size: 0.875rem; font-weight: 600; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+        .help-btn {
+            width: 28px; height: 28px; border-radius: 6px; border: 1px solid #3f3f46;
+            background: transparent; color: #a1a1aa; cursor: pointer; font-size: 0.875rem;
+            font-weight: 600; display: flex; align-items: center; justify-content: center;
+            transition: all 0.15s;
+        }
         .help-btn:hover { background: #27272a; color: #e4e4e7; border-color: #6366f1; }
+        .help-overlay {
+            position: fixed; inset: 0; z-index: 999; background: rgba(0,0,0,0.6);
+            display: none; align-items: center; justify-content: center; padding: 1rem;
+        }
+        .help-overlay.visible { display: flex; }
+        .help-modal {
+            background: #18181b; border: 1px solid #27272a; border-radius: 16px;
+            padding: 1.5rem; max-width: 480px; width: 100%; max-height: 80vh; overflow-y: auto;
+        }
+        .help-modal h2 { font-size: 1.1rem; color: #fff; margin-bottom: 1rem; }
+        .help-modal h3 { font-size: 0.9rem; color: #e0e0e0; margin: 1rem 0 0.5rem; }
+        .help-modal p, .help-modal li { font-size: 0.8125rem; color: #a1a1aa; line-height: 1.6; }
+        .help-modal ul { list-style: none; padding: 0; }
+        .help-modal ul li::before { content: "> "; color: #6366f1; }
+        .help-modal ul li { margin-bottom: 0.35rem; }
+        .help-modal .close-btn {
+            float: right; width: 28px; height: 28px; border-radius: 6px;
+            border: 1px solid #3f3f46; background: transparent; color: #a1a1aa;
+            cursor: pointer; font-size: 1rem; display: flex; align-items: center;
+            justify-content: center;
+        }
+        .help-modal .close-btn:hover { background: #27272a; color: #fff; }
+        .help-modal a { color: #6366f1; text-decoration: none; }
+        .help-modal a:hover { text-decoration: underline; }
         .mic-remaining { font-size: 0.75rem; color: #71717a; padding: 0.25rem 0.5rem; border-radius: 4px; background: #18181b; border: 1px solid #27272a; white-space: nowrap; }
         .mic-remaining.low { color: #f59e0b; border-color: #92400e; background: #1c1408; }
         .mic-remaining.empty { color: #ef4444; border-color: #991b1b; background: #1c0a0a; }
@@ -1275,7 +1247,11 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 <div class="brand-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
                 <span class="brand-name">SQS Signal</span>
             </div>
-            <button class="signout-btn" onclick="signout()">Sign out</button>
+            <div style="display:flex;align-items:center;gap:0.5rem;">
+                <span class="mic-remaining" id="mic-remaining">__MIC_REMAINING__ / __MIC_LIMIT__ min</span>
+                <button class="help-btn" onclick="toggleHelp()" title="Help">?</button>
+                <button class="signout-btn" onclick="signout()">Sign out</button>
+            </div>
         </div>
         <div class="main-area">
             <div class="lang-row">
@@ -1293,8 +1269,8 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     <option value="zh">Chinese</option>
                     <option value="auto">Auto-detect</option>
                 </select>
-            </div>
-            <div class="input-row">
+        </div>
+        <div class="input-row" id="input-row">
                 <label class="drop-zone" id="drop-zone" for="audio-file">
                     <input type="file" id="audio-file" accept="audio/*,video/*">
                     <div class="drop-zone-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg></div>
@@ -1354,6 +1330,48 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 </div>
                 <div class="debug-log" id="debug-log"><div class="debug-empty">Waiting for activity...</div></div>
             </div>
+        </div>
+    </div>
+    <div class="help-overlay" id="help-overlay" onclick="closeHelp(event)">
+        <div class="help-modal" onclick="event.stopPropagation()">
+            <button class="close-btn" onclick="closeHelp()">&times;</button>
+            <h2>How to use SQS Signal</h2>
+
+            <h3>Transcription requires sign-in</h3>
+            <p>You are signed in. All transcription is authenticated.</p>
+
+            <h3>Mic Mode (record then transcribe)</h3>
+            <ul>
+                <li>Click the mic button to start recording</li>
+                <li>Short clips (5-20 seconds) work best on this CPU server</li>
+                <li>Click stop to transcribe — the app sends the last ~4 seconds to Whisper</li>
+                <li>You have a daily limit of <strong>15 minutes</strong> per user (shown in the top bar)</li>
+                <li>When the quota runs out, the mic button is disabled. Try upload instead.</li>
+                <li>Uses the faster <code>tiny.en</code> model for quick turnaround</li>
+            </ul>
+
+            <h3>Upload Mode</h3>
+            <ul>
+                <li>Drag and drop or click to browse audio/video files (up to 50 MB)</li>
+                <li>Uses the better <code>small.en</code> model</li>
+                <li>No daily quota — upload as much as you like</li>
+                <li>Supports most audio/video formats via ffmpeg</li>
+            </ul>
+
+            <h3>Tips</h3>
+            <ul>
+                <li>Use mic for quick notes, upload for anything important</li>
+                <li>Anti-hallucination filtering removes common false positives from short clips</li>
+                <li>Results can be copied to clipboard or downloaded as .txt</li>
+                <li>The debug panel shows what the app is doing in real time</li>
+            </ul>
+
+            <h3>Support</h3>
+            <p>
+                If you find this project useful, consider
+                <a href="https://ko-fi.com/sidequeststudios" target="_blank">supporting development on Ko-fi</a>.
+                Source code: <a href="https://github.com/rasrobo/sqs.chat" target="_blank">github.com/rasrobo/sqs.chat</a>
+            </p>
         </div>
     </div>
     <div class="status-dock" id="status-dock">
@@ -1938,13 +1956,25 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live captions. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
-            var d = document.getElementById("help-dropdown");
-            d.style.display = d.style.display === "none" ? "block" : "none";
+            var overlay = document.getElementById("help-overlay");
+            overlay.classList.toggle("visible");
         };
-        document.addEventListener("click", function(e) {
-            var d = document.getElementById("help-dropdown");
-            if (d && !e.target.closest(".help-wrapper")) d.style.display = "none";
+        window.closeHelp = function(e) {
+            if (e && e.target !== e.currentTarget) return;
+            document.getElementById("help-overlay").classList.remove("visible");
+        };
+        document.addEventListener("keydown", function(e) {
+            if (e.key === "Escape") document.getElementById("help-overlay").classList.remove("visible");
         });
+        function updateMicRemaining(usedSec) {
+            var limitSec = parseInt("__MIC_LIMIT_SEC__" || "900");
+            var remainingSec = Math.max(0, limitSec - (usedSec || 0));
+            var remainingMin = Math.ceil(remainingSec / 60);
+            var el = document.getElementById("mic-remaining");
+            if (el) el.textContent = remainingMin + " / " + Math.ceil(limitSec/60) + " min";
+            var quotaBanner = document.getElementById("mic-quota-exceeded");
+            if (quotaBanner) quotaBanner.style.display = remainingSec <= 0 ? "block" : "none";
+        }
         window.addEventListener("load", function() {
             var remaining = parseInt("__MIC_REMAINING_SEC__" || "900");
             var limit = parseInt("__MIC_LIMIT_SEC__" || "900");

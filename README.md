@@ -9,8 +9,7 @@ Supports microphone recording and file upload transcription through a clean web 
 
 - **Record & Transcribe** — Speak into your microphone, stop, and get a transcription
 - **File Upload** — Upload audio/video files for higher-quality transcription (`small.en` model)
-- **GitHub OAuth Sign-in** — Any GitHub user can access the app
-- **Legacy Token Auth** — Backward-compatible token auth (being phased out)
+- **GitHub OAuth Sign-in** — Any GitHub user can sign in to access the app
 - **Daily Mic Quota** — 15 minutes of mic transcription per user per day (upload is unlimited)
 - **Access Logging** — All sign-ins, app access, and transcription activity are logged
 - **CPU-Optimized** — Designed to run on a single CPU VPS (no GPU required)
@@ -68,9 +67,6 @@ Internet → Caddy (:443/:80) → Web (:8892 → :8000) → Whisper (:8891 → :
    GITHUB_CLIENT_ID=your_client_id
    GITHUB_CLIENT_SECRET=your_client_secret
    GITHUB_CALLBACK_URL=https://your-domain.com/auth/github/callback
-
-   # Optional — legacy token auth
-   AUTH_TOKEN=your-random-token
    ```
 
 4. Start the stack:
@@ -93,15 +89,14 @@ All configuration is via environment variables (see `.env.example`):
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GITHUB_CLIENT_ID` | Yes* | — | GitHub OAuth App client ID |
-| `GITHUB_CLIENT_SECRET` | Yes* | — | GitHub OAuth App client secret |
-| `GITHUB_CALLBACK_URL` | Yes* | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
-| `AUTH_TOKEN` | No | — | Legacy token auth (being removed) |
+| `GITHUB_CLIENT_ID` | Yes | — | GitHub OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | Yes | — | GitHub OAuth App client secret |
+| `GITHUB_CALLBACK_URL` | Yes | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
 | `WHISPER_SERVICE_URL` | No | `http://whisper-service:8000` | Internal whisper service URL |
 | `MAX_FILE_SIZE_MB` | No | `50` | Max upload file size in MB |
 | `COOKIE_SECURE` | No | `False` | Set to `True` for HTTPS production |
 
-*\* GitHub OAuth is optional if you only use legacy token auth, but it is the recommended sign-in method.*
+*\* All variables except `WHISPER_SERVICE_URL` and `MAX_FILE_SIZE_MB` should be set for production use.*
 
 ## Quota System
 
@@ -125,12 +120,9 @@ This project uses a **Sustainable Use License** — see [LICENSE](LICENSE) for d
 
 In summary: source is visible and self-hostable, but you may not offer it as a competing commercial hosted transcription service without permission. This is inspired by the fair-code model (n8n, GitLab EE).
 
-## Buy Me a Coffee
+## Support
 
-<!-- TODO: Add your Buy Me a Coffee link here if you have one -->
-<!-- Example: https://buymeacoffee.com/yourusername -->
-
-If you find this project useful, consider supporting its development.
+If you find this project useful, consider [supporting its development on Ko-fi](https://ko-fi.com/sidequeststudios).
 
 ---
 
