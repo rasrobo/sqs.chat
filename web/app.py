@@ -738,8 +738,8 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
                         transcribe_elapsed = _t.time() - transcribe_start
                         total_elapsed = _t.time() - stop_start
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Transcribe result: '{result}' (len={len(result) if result else 0})", flush=True)
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Timing: {transcribe_elapsed:.1f}s transcription, {total_elapsed:.1f}s total ({transcribe_elapsed/window_duration:.1f}x realtime for {window_duration:.1f}s window)", flush=True)
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={window_duration:.1f} transcribe_sec={transcribe_elapsed:.1f} realtime_ratio={transcribe_elapsed/window_duration:.2f} result_len={len(result) if result else 0} result=success", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS:{transcriber.session_id[:8]}] Timing: {transcribe_elapsed:.1f}s transcription, {total_elapsed:.1f}s total ({transcribe_elapsed/full_duration:.1f}x realtime for {full_duration:.1f}s window)", flush=True)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=mic audio_sec={full_duration:.1f} transcribe_sec={transcribe_elapsed:.1f} realtime_ratio={transcribe_elapsed/full_duration:.2f} result_len={len(result) if result else 0} result=success", flush=True)
                         await websocket.send_json({
                             "type": "done",
                             "text": result or transcriber.last_transcript or "",
