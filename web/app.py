@@ -85,6 +85,7 @@ def is_github_auth_enabled() -> bool:
 
 
 GITHUB_AUTH_ENABLED = is_github_auth_enabled()
+IS_QUOTA_ENABLED = GITHUB_AUTH_ENABLED
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "") if GITHUB_AUTH_ENABLED else ""
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "") if GITHUB_AUTH_ENABLED else ""
 GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback") if GITHUB_AUTH_ENABLED else ""
@@ -328,6 +329,8 @@ def log_access(user_id, username, action, detail="", ip=""):
 
 
 def check_mic_quota(user_id, additional_seconds=0):
+    if not IS_QUOTA_ENABLED:
+        return True
     today = date.today().isoformat()
     conn = get_db()
     c = conn.cursor()
@@ -339,6 +342,8 @@ def check_mic_quota(user_id, additional_seconds=0):
 
 
 def get_mic_usage(user_id):
+    if not IS_QUOTA_ENABLED:
+        return {"used": 0, "remaining": 999999, "limit": 999999}
     today = date.today().isoformat()
     conn = get_db()
     c = conn.cursor()
@@ -351,6 +356,8 @@ def get_mic_usage(user_id):
 
 
 def record_mic_usage(user_id, seconds):
+    if not IS_QUOTA_ENABLED:
+        return
     today = date.today().isoformat()
     conn = get_db()
     c = conn.cursor()
@@ -364,6 +371,8 @@ def record_mic_usage(user_id, seconds):
 
 
 def check_upload_quota(user_id, additional_mb=0):
+    if not IS_QUOTA_ENABLED:
+        return True
     today = date.today().isoformat()
     conn = get_db()
     c = conn.cursor()
@@ -375,6 +384,8 @@ def check_upload_quota(user_id, additional_mb=0):
 
 
 def get_upload_usage(user_id):
+    if not IS_QUOTA_ENABLED:
+        return {"used": 0, "remaining": 999999, "limit": 999999}
     today = date.today().isoformat()
     conn = get_db()
     c = conn.cursor()
@@ -387,6 +398,8 @@ def get_upload_usage(user_id):
 
 
 def record_upload_usage(user_id, mb):
+    if not IS_QUOTA_ENABLED:
+        return
     today = date.today().isoformat()
     conn = get_db()
     c = conn.cursor()
@@ -437,6 +450,7 @@ async def index(user: dict = Depends(optional_user)):
 async def app_config():
     return {
         "github_auth_enabled": GITHUB_AUTH_ENABLED,
+        "quotas_enabled": IS_QUOTA_ENABLED,
     }
 
 
@@ -506,20 +520,21 @@ async def auth_github_callback(request: Request, code: str, state: str):
 @app.get("/auth/github/status")
 async def auth_github_status(user: dict = Depends(optional_user)):
     if not GITHUB_AUTH_ENABLED:
-        return {"authenticated": False, "github_auth_enabled": False}
+        return {"authenticated": False, "github_auth_enabled": False, "quotas_enabled": IS_QUOTA_ENABLED}
     if not user:
-        return {"authenticated": False, "github_auth_enabled": True}
-    used = get_mic_usage(user["user_id"]) if user.get("user_id") else 0
+        return {"authenticated": False, "github_auth_enabled": True, "quotas_enabled": IS_QUOTA_ENABLED}
+    mic_usage = get_mic_usage(user["user_id"]) if user.get("user_id") else {"used": 0, "remaining": 999999, "limit": 999999}
     return {
         "authenticated": True,
         "github_auth_enabled": True,
+        "quotas_enabled": IS_QUOTA_ENABLED,
         "user_id": user.get("user_id", ""),
         "username": user.get("username", ""),
         "avatar_url": user.get("avatar_url", ""),
         "auth_method": user.get("auth_method", ""),
-        "mic_used_seconds": used,
-        "mic_remaining_seconds": max(0, MIC_DAILY_LIMIT_SECONDS - used),
-        "mic_limit_seconds": MIC_DAILY_LIMIT_SECONDS,
+        "mic_used_seconds": mic_usage["used"],
+        "mic_remaining_seconds": mic_usage["remaining"],
+        "mic_limit_seconds": mic_usage["limit"],
     }
 
 
@@ -553,6 +568,7 @@ async def app_page(request: Request):
                 page = page.replace("__MIC_LIMIT__", str(limit_min))
                 page = page.replace("__MIC_REMAINING_SEC__", str(int(mic["remaining"])))
                 page = page.replace("__MIC_LIMIT_SEC__", str(int(mic["limit"])))
+                page = page.replace("__QUOTAS_ENABLED__", "true" if IS_QUOTA_ENABLED else "false")
                 return HTMLResponse(page, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     return RedirectResponse(url="/signin", status_code=303)
 
@@ -2374,6 +2390,13 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             if (quotaBanner) quotaBanner.style.display = remainingSec <= 0 ? "block" : "none";
         }
         window.addEventListener("load", function() {
+            var quotasEnabled = "__QUOTAS_ENABLED__" === "true";
+            if (!quotasEnabled) {
+                var remainingEl = document.getElementById("mic-remaining");
+                if (remainingEl) remainingEl.style.display = "none";
+                var label = document.getElementById("mic-label");
+                if (label) label.textContent = "Dictate";
+            }
             var remaining = parseInt("__MIC_REMAINING_SEC__" || "900");
             var limit = parseInt("__MIC_LIMIT_SEC__" || "900");
             var q = document.getElementById("mic-quota-exceeded");

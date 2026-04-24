@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 
-**SQS Signal** is a self-hosted dictation app that turns speech into text using [OpenAI Whisper](https://github.com/openai/whisper). Speak your drafts, notes, prompts, and memos faster than you'd type them — all on your own infrastructure with GitHub OAuth.
+**SQS Signal** is a self-hosted dictation app that turns speech into text using [OpenAI Whisper](https://github.com/openai/whisper). Speak your drafts, notes, prompts, and memos faster than you'd type them — all on your own infrastructure with GitHub OAuth. Optional daily quotas apply when GitHub auth is enabled.
 
 ## Why dictation?
 
@@ -123,11 +123,13 @@ Then restart the stack:
 | `GITHUB_CALLBACK_URL` | If auth enabled | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
 | `WHISPER_SERVICE_URL` | No | `http://whisper-service:8000` | Internal whisper service URL |
 | `MAX_FILE_SIZE_MB` | No | `50` | Max uploaded file size in MB |
-| `DAILY_UPLOAD_LIMIT_MB` | No | `100` | Max total upload size per user per day |
-| `MAX_RECORDING_MINUTES` | No | `15` | Max mic recording time per user per day |
+| `DAILY_UPLOAD_LIMIT_MB` | No | `100` | Max total upload size per user per day (only when `GITHUB_AUTH_ENABLED=true`) |
+| `MAX_RECORDING_MINUTES` | No | `15` | Max mic recording time per user per day (only when `GITHUB_AUTH_ENABLED=true`) |
 | `COOKIE_SECURE` | No | `False` | Set `True` for HTTPS production |
 
 ## Quota System
+
+Quotas only apply when `GITHUB_AUTH_ENABLED=true`. Without auth, all users are anonymous and quotas are not enforced.
 
 - **Mic**: 15 minutes per user per day (resets at midnight UTC). Configurable via `MAX_RECORDING_MINUTES`.
 - **Upload**: 100 MB per user per day. Configurable via `DAILY_UPLOAD_LIMIT_MB`.
