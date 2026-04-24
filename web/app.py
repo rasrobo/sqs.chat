@@ -1035,6 +1035,30 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
 
 
 @app.post("/transcribe")
+def segments_to_srt(segments):
+    lines = []
+    for i, seg in enumerate(segments, 1):
+        start = seg.get("start", 0)
+        end = seg.get("end", 0)
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        start_ts = _format_srt_time(start)
+        end_ts = _format_srt_time(end)
+        lines.append(str(i))
+        lines.append(f"{start_ts} --> {end_ts}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
+
+def _format_srt_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
 async def transcribe(
     request: Request,
     file: UploadFile = File(...),
@@ -1087,7 +1111,11 @@ async def transcribe(
         elapsed = _time.time() - start_time
         result = resp.json()
         text = result.get("text", "")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload file_kb={file_size_kb:.0f} transcribe_sec={elapsed:.1f} whisper_sec={whisper_sec:.1f} save_sec={save_sec:.1f} result_len={len(text)} result=success", flush=True)
+        segments = result.get("segments", [])
+        srt_text = segments_to_srt(segments) if segments else text
+        result["srt"] = srt_text
+        result["format"] = "srt"
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload file_kb={file_size_kb:.0f} transcribe_sec={elapsed:.1f} whisper_sec={whisper_sec:.1f} save_sec={save_sec:.1f} result_len={len(text)} srt_len={len(srt_text)} result=success", flush=True)
 
         log_access(auth.get("user_id", ""), auth.get("username", ""), "transcribe", f"upload {file_size_kb:.0f}kb", request.client.host if request.client else "")
         record_upload_usage(auth.get("user_id", ""), file_size_mb)
@@ -1809,7 +1837,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             <h3>Upload Mode</h3>
             <ul>
                 <li>Drag and drop or click to browse audio/video files (up to """ + str(MAX_FILE_SIZE_MB) + """ MB, """ + str(UPLOAD_DAILY_LIMIT_MB) + """ MB daily limit)</li>
-                <li>Uses the better <code>small.en</code> model for accurate transcription</li>
+                <li>Uses <code>tiny.en</code> model with SRT timestamped output</li>
                 <li>Supports most audio/video formats via ffmpeg</li>
             </ul>
 
@@ -1817,7 +1845,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             <ul>
                 <li>Use mic for quick dictation, upload for finished recordings</li>
                 <li>Anti-hallucination filtering removes common false positives from short clips</li>
-                <li>Results can be copied to clipboard or downloaded as .txt</li>
+                <li>Results can be copied to clipboard or downloaded as .srt (subtitle format with timestamps)</li>
                 <li>The debug panel shows what the app is doing in real time</li>
             </ul>
 
@@ -2373,20 +2401,21 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 debug('info', 'Response: ' + res.status + ' in ' + ms + 'ms');
                 return res.json().then(function(data) {
                     if (res.ok) {
-                        resultTextValue = data.text || ''; resultText.textContent = resultTextValue || 'No output';
+                        resultTextValue = data.srt || data.text || ''; resultText.textContent = resultTextValue || 'No output';
                         resultPanel.classList.add('visible');
                         var model = data.model || '?'; var lang = data.language || '?';
-                        debug('success', 'Transcription done | model=' + model + ' lang=' + lang + ' text_len=' + resultTextValue.length);
-                        debug('info', 'Text: ' + resultTextValue.substr(0, 120) + (resultTextValue.length > 120 ? '...' : ''));
-                        resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span>';
+                        var textLen = (data.text || '').length;
+                        debug('success', 'Transcription done | model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
+                        debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
+                        resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>';
                         setStatus('done', 'Complete', Math.round(ms / 1000) + 's'); showToast('Transcription ready');
                     } else { debug('error', 'Error: ' + (data.detail || 'Unknown (' + res.status + ')')); setStatus('error', 'Error', data.detail || 'Unknown error'); showToast(data.detail || 'Error'); }
                 });
             }).catch(function(err) { debug('error', 'Network error: ' + err.message); setStatus('error', 'Network error', err.message); showToast('Network error'); });
         });
 
-        window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); };
-        window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var blob = new Blob([text], { type: 'text/plain' }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript.txt'; a.click(); URL.revokeObjectURL(url); };
+        window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
+        window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var isSrt = text.indexOf(' --> ') !== -1; var ext = isSrt ? '.srt' : '.txt'; var mime = isSrt ? 'text/plain' : 'text/plain'; var blob = new Blob([text], { type: mime }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript' + ext; a.click(); URL.revokeObjectURL(url); };
         window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
