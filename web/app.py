@@ -1034,7 +1034,6 @@ async def websocket_transcribe(websocket: WebSocket, language: str = "en"):
         print(f"[WS:{transcriber.session_id[:8]}] Disconnected", flush=True)
 
 
-@app.post("/transcribe")
 def segments_to_srt(segments):
     lines = []
     for i, seg in enumerate(segments, 1):
@@ -1059,6 +1058,7 @@ def _format_srt_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+@app.post("/transcribe")
 async def transcribe(
     request: Request,
     file: UploadFile = File(...),
