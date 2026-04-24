@@ -41,6 +41,33 @@ error_logger = setup_logger("sqs.error", "/app/logs/error.log", 5 * 1024 * 1024,
 
 app = FastAPI(title="SQS Signal", version="2.0.0")
 
+
+@app.on_event("startup")
+async def start_cleanup_task():
+    asyncio.create_task(cleanup_old_uploads())
+
+
+async def cleanup_old_uploads():
+    """Periodically delete files in UPLOAD_DIR older than 1 hour."""
+    import time as _t
+    while True:
+        try:
+            now = _t.time()
+            one_hour = 3600
+            for entry in os.listdir(UPLOAD_DIR):
+                path = os.path.join(UPLOAD_DIR, entry)
+                try:
+                    if os.path.isfile(path) and now - os.path.getmtime(path) > one_hour:
+                        os.unlink(path)
+                    elif os.path.isdir(path) and now - os.path.getmtime(path) > one_hour:
+                        import shutil
+                        shutil.rmtree(path, ignore_errors=True)
+                except:
+                    pass
+        except:
+            pass
+        await asyncio.sleep(600)  # every 10 minutes
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,7 +80,7 @@ WHISPER_SERVICE_URL = os.getenv("WHISPER_SERVICE_URL", "http://whisper-service:8
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "100"))
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 SESSION_COOKIE_NAME = "sqs_session"
 SESSION_MAX_AGE_REMEMBER = 60 * 60 * 24 * 30
@@ -1533,7 +1560,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     <input type="file" id="audio-file" accept="audio/*,video/*">
                     <div class="drop-zone-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg></div>
                     <div class="drop-zone-label"><strong>Drop audio</strong> or click to browse</div>
-                    <div class="drop-zone-hint">For longer/higher-quality audio &middot; Max """ + str(MAX_FILE_SIZE_MB) + """ MB</div>
+                    <div class="drop-zone-hint">For longer/higher-quality audio &middot; Max 100 MB</div>
                 </label>
                 <div class="mic-btn" id="mic-btn" role="button" tabindex="0" title="Click to record">
                     <div class="mic-icon" id="mic-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg></div>
@@ -2046,7 +2073,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             // Minimum recording duration guard: reject sub-1s recordings client-side
             var recordingDuration = elapsedSeconds || 0;
             var audioChunks = chunks.length;
-            if (recordingDuration < 1 && audioChunks < 2) {
+            if (recordingDuration < 1 && audioChunks < 1) {
                 debug("warn", "Recording too short (" + recordingDuration + "s, " + audioChunks + " chunks), rejecting");
                 isStopping = true;
                 isClientRejected = true;
