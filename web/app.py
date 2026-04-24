@@ -812,8 +812,17 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
 
         print(f"[WS:{transcriber.session_id[:8]}] Whisper status {resp.status_code}", flush=True)
         if resp.status_code != 200:
-            print(f"[WS:{transcriber.session_id[:8]}] Whisper error: {resp.text[:200]}", flush=True)
+            err_msg = resp.text[:200]
+            print(f"[WS:{transcriber.session_id[:8]}] Whisper error: {err_msg}", flush=True)
             transcriber.set_transcribing(False)
+            try:
+                await transcriber.ws.send_json({"type": "error", "message": "Transcription service error — try again."})
+            except:
+                pass
+            import os as _os
+            if _os.path.exists(tmp_wav):
+                try: _os.unlink(tmp_wav)
+                except: pass
             return
 
         result = resp.json()
