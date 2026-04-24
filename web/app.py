@@ -801,7 +801,7 @@ async def transcribe_buffer(transcriber: LiveTranscriber, window_seconds: float 
 
     try:
         print(f"[WS:{transcriber.session_id[:8]}] Calling Whisper ({decoded_size} bytes WAV)", flush=True)
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             with open(tmp_wav, "rb") as f:
                 form_data = {"file": ("audio.wav", f, "audio/wav")}
                 data = {
@@ -2263,7 +2263,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 try { wsRef.send(JSON.stringify({ type: "stop" })); debug('info', 'Stop msg sent'); }
                 catch(e) { debug('error', 'Stop send error: ' + e.message); }
                 wsDoneTimeout = setTimeout(function() {
-                    debug('warn', 'Stop timeout - no done/final/error received within 45s');
+                    debug('warn', 'Stop timeout - no done/final/error received within 120s');
                     if (!wsDoneFlag) { 
                         setStatus('error', 'Timeout', 'Transcription taking too long');
                         showToast("Couldn't finish this clip. Try shorter dictation or upload.");
@@ -2271,7 +2271,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     }
                     if (wsRef && wsRef.readyState < 2) { wsRef.close(); wsRef = null; wsConnected = false; }
                 cleanupRecording('error');
-                }, 45000);
+                }, 120000);
                 
                 // Immediately update to processing state
                 setStatus('processing', 'Transcribing...', 'Please wait (CPU server)');
