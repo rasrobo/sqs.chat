@@ -122,7 +122,7 @@ Then restart the stack:
 | `GITHUB_CLIENT_SECRET` | If auth enabled | — | GitHub OAuth App client secret |
 | `GITHUB_CALLBACK_URL` | If auth enabled | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
 | `WHISPER_SERVICE_URL` | No | `http://whisper-service:8000` | Internal whisper service URL |
-| `MAX_FILE_SIZE_MB` | No | `50` | Max uploaded file size in MB |
+| `MAX_FILE_SIZE_MB` | No | `50` | Max uploaded file size in MB. Increase for large files (e.g. `500`). Larger files need more CPU time — adjust `read_timeout` in Caddyfile accordingly. |
 | `DAILY_UPLOAD_LIMIT_MB` | No | `100` | Max total upload size per user per day (only when `GITHUB_AUTH_ENABLED=true`) |
 | `MAX_RECORDING_MINUTES` | No | `15` | Max mic recording time per user per day (only when `GITHUB_AUTH_ENABLED=true`) |
 | `COOKIE_SECURE` | No | `False` | Set `True` for HTTPS production |

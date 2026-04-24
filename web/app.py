@@ -89,7 +89,7 @@ IS_QUOTA_ENABLED = GITHUB_AUTH_ENABLED
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "") if GITHUB_AUTH_ENABLED else ""
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "") if GITHUB_AUTH_ENABLED else ""
 GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback") if GITHUB_AUTH_ENABLED else ""
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "100"))
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 DAILY_UPLOAD_LIMIT_MB = int(os.getenv("DAILY_UPLOAD_LIMIT_MB", "100"))
 MAX_RECORDING_MINUTES = int(os.getenv("MAX_RECORDING_MINUTES", "15"))
@@ -2409,7 +2409,16 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                         debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
                         resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>';
                         setStatus('done', 'Complete', Math.round(ms / 1000) + 's'); showToast('Transcription ready');
-                    } else { debug('error', 'Error: ' + (data.detail || 'Unknown (' + res.status + ')')); setStatus('error', 'Error', data.detail || 'Unknown error'); showToast(data.detail || 'Error'); }
+                    } else {
+                        var errorMsg = data.detail;
+                        if (Array.isArray(data.detail)) {
+                            errorMsg = data.detail.map(function(e) { return e.msg; }).join('; ');
+                        }
+                        if (!errorMsg) errorMsg = 'Unknown (' + res.status + ')';
+                        debug('error', 'Error: ' + errorMsg);
+                        setStatus('error', 'Upload failed', errorMsg.substr(0, 120));
+                        showToast(errorMsg);
+                    }
                 });
             }).catch(function(err) { debug('error', 'Network error: ' + err.message); setStatus('error', 'Network error', err.message); showToast('Network error'); });
         });

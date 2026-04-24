@@ -28,13 +28,13 @@ services:
       - .env
     environment:
       - WHISPER_SERVICE_URL=http://whisper-service:8000
-      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
-      - DAILY_UPLOAD_LIMIT_MB=${DAILY_UPLOAD_LIMIT_MB:-100}  # only active when GITHUB_AUTH_ENABLED=true
-      - MAX_RECORDING_MINUTES=${MAX_RECORDING_MINUTES:-15}  # only active when GITHUB_AUTH_ENABLED=true
       - COOKIE_SECURE=${COOKIE_SECURE:-False}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - GITHUB_CALLBACK_URL=${GITHUB_CALLBACK_URL:-https://sqs.chat/auth/github/callback}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      - DAILY_UPLOAD_LIMIT_MB=${DAILY_UPLOAD_LIMIT_MB:-100}
+      - MAX_RECORDING_MINUTES=${MAX_RECORDING_MINUTES:-15}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
