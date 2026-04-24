@@ -1050,6 +1050,7 @@ async def transcribe(
         raise HTTPException(status_code=400, detail=f"File too large. Max {MAX_FILE_SIZE_MB}MB")
 
     file_size_mb = (file.size or 0) / (1024 * 1024)
+    file_size_kb_input = (file.size or 0) / 1024
     if not check_upload_quota(auth.get("user_id", ""), file_size_mb):
         used = get_upload_usage(auth.get("user_id", ""))["used"]
         raise HTTPException(
@@ -1060,31 +1061,41 @@ async def transcribe(
     suffix = file.filename.split(".")[-1] if "." in file.filename else "tmp"
     tmp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{suffix}")
     try:
+        t0 = _time.time()
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
+        save_sec = _time.time() - t0
         file_size_kb = os.path.getsize(tmp_path) / 1024
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        print(f"[UPLOAD] file={file.filename} input_kb={file_size_kb_input:.0f} saved_kb={file_size_kb:.0f} save_sec={save_sec:.1f}", flush=True)
+
+        t1 = _time.time()
+        async with httpx.AsyncClient(timeout=1800.0) as client:
             with open(tmp_path, "rb") as f:
                 form_data = {"file": (file.filename, f, file.content_type)}
-                data = {"language": language if language != "auto" else "en", "model_name": "small.en"}
+                data = {"language": language if language != "auto" else "en", "model_name": "tiny.en"}
                 resp = await client.post(
                     f"{WHISPER_SERVICE_URL}/transcribe",
                     files=form_data, data=data
                 )
+        whisper_sec = _time.time() - t1
+        print(f"[UPLOAD] whisper_sec={whisper_sec:.1f} status={resp.status_code}", flush=True)
+
         if resp.status_code != 200:
             raise HTTPException(status_code=500, detail=resp.text)
 
         elapsed = _time.time() - start_time
         result = resp.json()
         text = result.get("text", "")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload file_kb={file_size_kb:.0f} transcribe_sec={elapsed:.1f} result_len={len(text)} result=success", flush=True)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload file_kb={file_size_kb:.0f} transcribe_sec={elapsed:.1f} whisper_sec={whisper_sec:.1f} save_sec={save_sec:.1f} result_len={len(text)} result=success", flush=True)
 
         log_access(auth.get("user_id", ""), auth.get("username", ""), "transcribe", f"upload {file_size_kb:.0f}kb", request.client.host if request.client else "")
         record_upload_usage(auth.get("user_id", ""), file_size_mb)
 
         return result
     except httpx.TimeoutException:
+        elapsed = _time.time() - start_time
+        print(f"[UPLOAD] httpx timeout after {elapsed:.0f}s for file={file.filename} size_kb={file_size_kb:.0f}", flush=True)
         raise HTTPException(status_code=504, detail="Transcription timed out")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

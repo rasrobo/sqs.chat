@@ -1,9 +1,13 @@
 sqs.chat {
-    reverse_proxy web:8000 {
-        header_up Host {host}
-        header_up X-Real-IP {remote}
-        header_up X-Forwarded-For {remote}
-        header_up X-Forwarded-Proto {scheme}
-    }
-    encode zstd gzip
+	reverse_proxy web:8000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote}
+		header_up X-Forwarded-For {remote}
+		header_up X-Forwarded-Proto {scheme}
+		transport http {
+			read_timeout 1800s
+			dial_timeout 30s
+		}
+	}
+	encode zstd gzip
 }
