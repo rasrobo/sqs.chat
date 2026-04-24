@@ -77,9 +77,17 @@ app.add_middleware(
 )
 
 WHISPER_SERVICE_URL = os.getenv("WHISPER_SERVICE_URL", "http://whisper-service:8000")
-GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
-GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
-GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback")
+
+
+def is_github_auth_enabled() -> bool:
+    val = os.getenv("GITHUB_AUTH_ENABLED", "").strip().lower()
+    return val in ("true", "1", "yes", "on")
+
+
+GITHUB_AUTH_ENABLED = is_github_auth_enabled()
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "") if GITHUB_AUTH_ENABLED else ""
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "") if GITHUB_AUTH_ENABLED else ""
+GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback") if GITHUB_AUTH_ENABLED else ""
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "100"))
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 SESSION_COOKIE_NAME = "sqs_session"
@@ -423,12 +431,20 @@ async def index(user: dict = Depends(optional_user)):
     return HTMLResponse(LANDING_PAGE_SIGNED_OUT)
 
 
+@app.get("/config")
+async def app_config():
+    return {
+        "github_auth_enabled": GITHUB_AUTH_ENABLED,
+    }
+
+
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
         "version": "2.0.0",
         "github_oauth_configured": bool(GITHUB_CLIENT_ID),
+        "github_auth_enabled": GITHUB_AUTH_ENABLED,
     }
 
 
@@ -447,6 +463,8 @@ async def signin(request: Request):
 
 @app.get("/auth/github")
 async def auth_github(request: Request):
+    if not GITHUB_AUTH_ENABLED:
+        return HTMLResponse(NOT_CONFIGURED_PAGE, status_code=503)
     state = secrets.token_urlsafe(16)
     oauth_url = get_github_oauth_url(state)
     response = RedirectResponse(url=oauth_url, status_code=303)
@@ -456,6 +474,8 @@ async def auth_github(request: Request):
 
 @app.get("/auth/github/callback")
 async def auth_github_callback(request: Request, code: str, state: str):
+    if not GITHUB_AUTH_ENABLED:
+        return HTMLResponse(NOT_CONFIGURED_PAGE, status_code=503)
     stored_state = request.cookies.get("oauth_state", "")
     if not stored_state or stored_state != state:
         return HTMLResponse(SIGNIN_PAGE.replace(
@@ -483,11 +503,14 @@ async def auth_github_callback(request: Request, code: str, state: str):
 
 @app.get("/auth/github/status")
 async def auth_github_status(user: dict = Depends(optional_user)):
+    if not GITHUB_AUTH_ENABLED:
+        return {"authenticated": False, "github_auth_enabled": False}
     if not user:
-        return {"authenticated": False}
+        return {"authenticated": False, "github_auth_enabled": True}
     used = get_mic_usage(user["user_id"]) if user.get("user_id") else 0
     return {
         "authenticated": True,
+        "github_auth_enabled": True,
         "user_id": user.get("user_id", ""),
         "username": user.get("username", ""),
         "avatar_url": user.get("avatar_url", ""),
@@ -1204,11 +1227,8 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
             </ul>
         </div>
 
-        <div class="cta-group">
-            <a href="/auth/github" class="cta-btn">
-                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-                Sign in with GitHub
-            </a>
+        <div class="cta-group" id="cta-group">
+            <div id="github-signin-placeholder"></div>
         </div>
         <div class="oss-note">
             <p style="color:#52525b;font-size:0.8rem;margin:1rem 0 0.5rem;">
@@ -1233,6 +1253,19 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
             <a href="https://ko-fi.com/sidequeststudios">Ko-fi</a>
         </div>
     </div>
+    <script>
+        fetch('/config').then(r=>r.json()).then(cfg => {
+            if (cfg.github_auth_enabled) {
+                document.getElementById('github-signin-placeholder').innerHTML =
+                    '<a href="/auth/github" class="cta-btn">' +
+                    '<svg viewBox="0 0 24 24" fill="currentColor" style="width:20px;height:20px;"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>' +
+                    ' Sign in with GitHub</a>';
+            } else {
+                document.getElementById('github-signin-placeholder').innerHTML =
+                    '<a href="/app" class="cta-btn">Go to App</a>';
+            }
+        });
+    </script>
 </body>
 </html>"""
 
@@ -1388,15 +1421,58 @@ SIGNIN_PAGE = """<!DOCTYPE html>
         <h1>Sign in</h1>
         <p class="subtitle">to SQS Signal dictation service</p>
 
-        <a href="/auth/github" class="github-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-            Sign in with GitHub
-        </a>
+        <div id="github-signin-btn"></div>
 
+        <div class="back-link"><a href="/">&larr; Back to home</a></div>
+    </div>
+    <script>
+        fetch('/config').then(r=>r.json()).then(cfg => {
+            if (cfg.github_auth_enabled) {
+                document.getElementById('github-signin-btn').innerHTML =
+                    '<a href="/auth/github" class="github-btn">' +
+                    '<svg viewBox="0 0 24 24" fill="currentColor" style="width:20px;height:20px;"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>' +
+                    ' Sign in with GitHub</a>';
+            } else {
+                document.getElementById('github-signin-btn').innerHTML =
+                    '<p style="color:#a1a1aa;font-size:0.9rem;">GitHub login is not configured for this instance.</p>' +
+                    '<p style="color:#52525b;font-size:0.85rem;margin-top:0.5rem;">Set <code>GITHUB_AUTH_ENABLED=true</code> and configure OAuth credentials in .env to enable sign-in.</p>';
+            }
+        });
+    </script>
+    </div>
+</body>
+</html>"""
+
+
+NOT_CONFIGURED_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Login Not Configured - SQS Signal</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+        .card { background: #141414; border: 1px solid #222; border-radius: 16px; padding: 2.5rem; width: 100%; max-width: 480px; text-align: center; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.75rem; }
+        p { color: #a1a1aa; font-size: 0.9rem; line-height: 1.6; margin-bottom: 1rem; }
+        code { background: #1a1a1a; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: 'SF Mono', 'Fira Code', monospace; color: #6366f1; font-size: 0.85rem; }
+        .back-link { margin-top: 1.5rem; }
+        .back-link a { color: #52525b; text-decoration: none; font-size: 0.85rem; }
+        .back-link a:hover { color: #6366f1; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>GitHub Login Not Configured</h1>
+        <p>GitHub authentication is not enabled on this instance.</p>
+        <p>To enable sign-in, set <code>GITHUB_AUTH_ENABLED=true</code> and configure <code>GITHUB_CLIENT_ID</code>, <code>GITHUB_CLIENT_SECRET</code>, and <code>GITHUB_CALLBACK_URL</code> in your <code>.env</code> file.</p>
+        <p>See the <a href="https://github.com/rasrobo/sqs.chat#readme" style="color:#6366f1;">README</a> for setup instructions.</p>
         <div class="back-link"><a href="/">&larr; Back to home</a></div>
     </div>
 </body>
 </html>"""
+
 
 APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">

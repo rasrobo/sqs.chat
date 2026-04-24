@@ -17,7 +17,7 @@ Speaking is often faster than typing — 2-3x faster for rough drafts, meeting n
 - **CPU-Optimized Whisper** — Runs `small.en` model efficiently on CPU. No GPU needed.
 - **Self-Hosted & Private** — Your audio never leaves your server. Full data control.
 - **Docker, One Command** — `docker compose up -d` and you're running.
-- **GitHub OAuth** — Let any GitHub user sign in securely.
+- **GitHub OAuth** (optional) — Let any GitHub user sign in securely. Disabled by default.
 - **Built for Production** — Caddy HTTPS, SQLite persistence, access logging, daily mic quotas.
 
 ## Open-source stack
@@ -74,7 +74,7 @@ Internet → Caddy (:443/:80) → Web (:8892 → :8000) → Whisper (:8891 → :
 
 ### Prerequisites
 - Docker & Docker Compose
-- A [GitHub OAuth App](https://github.com/settings/developers)
+- (Optional for sign-in) A [GitHub OAuth App](https://github.com/settings/developers)
 
 ### Setup
 
@@ -84,21 +84,26 @@ cd sqs.chat
 cp .env.example .env
 ```
 
-Edit `.env` with your GitHub OAuth credentials:
-
-```
-GITHUB_CLIENT_ID=your_client_id
-GITHUB_CLIENT_SECRET=your_client_secret
-GITHUB_CALLBACK_URL=https://your-domain.com/auth/github/callback
-```
-
-Start the stack:
+By default, the app runs without GitHub sign-in — just start and use:
 
 ```bash
 docker compose up -d
 ```
 
-Visit `https://your-domain.com` — sign in with GitHub and start dictating.
+Visit `https://your-domain.com` and start transcribing immediately, no login required.
+
+### Enabling GitHub Sign-In (Optional)
+
+If you want authentication, set these in `.env`:
+
+```
+GITHUB_AUTH_ENABLED=true
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
+GITHUB_CALLBACK_URL=https://your-domain.com/auth/github/callback
+```
+
+Then restart the stack:
 
 ### GitHub OAuth Setup
 
@@ -110,10 +115,11 @@ Visit `https://your-domain.com` — sign in with GitHub and start dictating.
 ## Configuration
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
-| `GITHUB_CLIENT_ID` | Yes | — | GitHub OAuth App client ID |
-| `GITHUB_CLIENT_SECRET` | Yes | — | GitHub OAuth App client secret |
-| `GITHUB_CALLBACK_URL` | Yes | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
+|---|---|---|---|---|
+| `GITHUB_AUTH_ENABLED` | No | `false` | Set `true` to enable GitHub OAuth sign-in |
+| `GITHUB_CLIENT_ID` | If auth enabled | — | GitHub OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | If auth enabled | — | GitHub OAuth App client secret |
+| `GITHUB_CALLBACK_URL` | If auth enabled | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
 | `WHISPER_SERVICE_URL` | No | `http://whisper-service:8000` | Internal whisper service URL |
 | `MAX_FILE_SIZE_MB` | No | `50` | Max upload file size in MB |
 | `COOKIE_SECURE` | No | `False` | Set `True` for HTTPS production |
