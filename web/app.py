@@ -88,6 +88,7 @@ SESSION_MAX_AGE_SHORT = 60 * 60 * 8
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "False").lower() in ("true", "1", "yes")
 COOKIE_SAMESITE = "lax"
 MIC_DAILY_LIMIT_SECONDS = 15 * 60
+UPLOAD_DAILY_LIMIT_MB = 100
 
 UPLOAD_DIR = "/app/uploads"
 DATA_DIR = "/app/data"
@@ -152,6 +153,15 @@ def init_db():
             action TEXT,
             detail TEXT,
             ip_address TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS upload_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            usage_date TEXT NOT NULL,
+            mb_used REAL DEFAULT 0,
+            UNIQUE(user_id, usage_date)
         )
     """)
     # Migration: rename old sessions.pat_id -> user_id, add missing columns
@@ -339,6 +349,42 @@ def record_mic_usage(user_id, seconds):
                  ON CONFLICT(user_id, usage_date) DO UPDATE SET
                      seconds_used = seconds_used + excluded.seconds_used""",
               (user_id, today, seconds))
+    conn.commit()
+    conn.close()
+
+
+def check_upload_quota(user_id, additional_mb=0):
+    today = date.today().isoformat()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT mb_used FROM upload_usage WHERE user_id=? AND usage_date=?", (user_id, today))
+    row = c.fetchone()
+    conn.close()
+    used = row["mb_used"] if row else 0
+    return (used + additional_mb) <= UPLOAD_DAILY_LIMIT_MB
+
+
+def get_upload_usage(user_id):
+    today = date.today().isoformat()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT mb_used FROM upload_usage WHERE user_id=? AND usage_date=?", (user_id, today))
+    row = c.fetchone()
+    conn.close()
+    used = row["mb_used"] if row else 0
+    remaining = max(0, UPLOAD_DAILY_LIMIT_MB - used)
+    return {"used": used, "remaining": remaining, "limit": UPLOAD_DAILY_LIMIT_MB}
+
+
+def record_upload_usage(user_id, mb):
+    today = date.today().isoformat()
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""INSERT INTO upload_usage (user_id, usage_date, mb_used)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT(user_id, usage_date) DO UPDATE SET
+                     mb_used = mb_used + excluded.mb_used""",
+              (user_id, today, mb))
     conn.commit()
     conn.close()
 
@@ -952,6 +998,15 @@ async def transcribe(
         raise HTTPException(status_code=400, detail="File must be audio or video")
     if file.size and file.size > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail=f"File too large. Max {MAX_FILE_SIZE_MB}MB")
+
+    file_size_mb = (file.size or 0) / (1024 * 1024)
+    if not check_upload_quota(auth.get("user_id", ""), file_size_mb):
+        used = get_upload_usage(auth.get("user_id", ""))["used"]
+        raise HTTPException(
+            status_code=429,
+            detail=f"Upload limit reached ({UPLOAD_DAILY_LIMIT_MB}MB/day). Used {used:.1f}MB today."
+        )
+
     suffix = file.filename.split(".")[-1] if "." in file.filename else "tmp"
     tmp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{suffix}")
     try:
@@ -976,6 +1031,7 @@ async def transcribe(
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload file_kb={file_size_kb:.0f} transcribe_sec={elapsed:.1f} result_len={len(text)} result=success", flush=True)
 
         log_access(auth.get("user_id", ""), auth.get("username", ""), "transcribe", f"upload {file_size_kb:.0f}kb", request.client.host if request.client else "")
+        record_upload_usage(auth.get("user_id", ""), file_size_mb)
 
         return result
     except httpx.TimeoutException:
@@ -1142,7 +1198,7 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
                 <li><strong>Upload mode</strong> — Longer or higher-quality audio (up to 50 MB) using the better <code>small.en</code> model</li>
             </ul>
             <ul style="margin-top:0.75rem;">
-                <li>15-minute daily mic quota per user; upload is unlimited</li>
+                <li>15-minute daily mic quota per user; 100 MB daily upload limit</li>
                 <li>Language selection (11 languages + auto-detect)</li>
                 <li>Anti-hallucination filtering for short clips</li>
             </ul>
@@ -1272,7 +1328,7 @@ LANDING_PAGE_SIGNED_IN = """<!DOCTYPE html>
             <h2>Transcription Modes</h2>
             <ul>
                 <li><strong>Mic (record then transcribe)</strong> — Quick CPU notes, 5-20s ideal. 15 min/day quota.</li>
-                <li><strong>File upload</strong> — Longer audio/video files (up to 50 MB). Better quality model. Unlimited.</li>
+                <li><strong>File upload</strong> — Longer audio/video files (up to 100 MB). Better quality model. 100 MB daily limit.</li>
                 <li><strong>Language selection</strong> — 11 languages supported</li>
             </ul>
         </div>
@@ -1638,9 +1694,8 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
             <h3>Upload Mode</h3>
             <ul>
-                <li>Drag and drop or click to browse audio/video files (up to 50 MB)</li>
+                <li>Drag and drop or click to browse audio/video files (up to """ + str(MAX_FILE_SIZE_MB) + """ MB, 100 MB daily limit)</li>
                 <li>Uses the better <code>small.en</code> model for accurate transcription</li>
-                <li>No daily quota — upload as much as you like</li>
                 <li>Supports most audio/video formats via ffmpeg</li>
             </ul>
 
