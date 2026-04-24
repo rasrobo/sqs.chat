@@ -37,7 +37,8 @@ Additional open-source components:
 - **Microphone Dictation** — Speak, stop, get instant text via WebSocket
 - **File Upload** — Upload audio/video files for higher-quality results
 - **GitHub OAuth Sign-In** — Secure sign-in with any GitHub account
-- **Daily Mic Quota** — 15 minutes of microphone dictation per user per day (upload is unlimited)
+- **Daily Mic Quota** — 15 minutes of microphone dictation per user per day (configurable)
+- **Daily Upload Quota** — 100 MB per user per day (configurable)
 - **Access Logging** — All sign-ins and activity logged to SQLite + rotating files
 - **No GPU Required** — Optimized for single CPU VPS (tested on 2 vCPU / 4GB RAM)
 - **Docker Compose Stack** — Caddy + FastAPI Web + Whisper Service in 3 containers
@@ -66,7 +67,7 @@ Internet → Caddy (:443/:80) → Web (:8892 → :8000) → Whisper (:8891 → :
 - Optimized for **short dictation clips** (5-20 seconds ideal)
 - Uses the `small.en` Whisper model by default
 - Live dictation via WebSocket with configurable language support (11 languages + auto-detect)
-- File upload for pre-recorded audio and video files (up to 50 MB)
+- File upload for pre-recorded audio and video files (configurable: `MAX_FILE_SIZE_MB`, `DAILY_UPLOAD_LIMIT_MB`)
 - CPU-only inference (no GPU backend)
 - Self-hosted deployment on a single VPS or local machine
 
@@ -115,20 +116,23 @@ Then restart the stack:
 ## Configuration
 
 | Variable | Required | Default | Description |
-|---|---|---|---|---|
+|---|---|---|---|
 | `GITHUB_AUTH_ENABLED` | No | `false` | Set `true` to enable GitHub OAuth sign-in |
 | `GITHUB_CLIENT_ID` | If auth enabled | — | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | If auth enabled | — | GitHub OAuth App client secret |
 | `GITHUB_CALLBACK_URL` | If auth enabled | `https://sqs.chat/auth/github/callback` | OAuth callback URL |
 | `WHISPER_SERVICE_URL` | No | `http://whisper-service:8000` | Internal whisper service URL |
-| `MAX_FILE_SIZE_MB` | No | `50` | Max upload file size in MB |
+| `MAX_FILE_SIZE_MB` | No | `50` | Max uploaded file size in MB |
+| `DAILY_UPLOAD_LIMIT_MB` | No | `100` | Max total upload size per user per day |
+| `MAX_RECORDING_MINUTES` | No | `15` | Max mic recording time per user per day |
 | `COOKIE_SECURE` | No | `False` | Set `True` for HTTPS production |
 
 ## Quota System
 
-- **Mic**: 15 minutes per user per day (resets at midnight UTC)
-- **Upload**: Unlimited
-- Quota enforced server-side with SQLite — users see remaining time in the UI
+- **Mic**: 15 minutes per user per day (resets at midnight UTC). Configurable via `MAX_RECORDING_MINUTES`.
+- **Upload**: 100 MB per user per day. Configurable via `DAILY_UPLOAD_LIMIT_MB`.
+- Quotas enforced server-side with SQLite — users see remaining time/quota in the UI.
+- When mic quota is exhausted, users are prompted to use upload mode instead.
 
 ## Access Logging
 

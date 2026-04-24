@@ -90,13 +90,15 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "") if GITHUB_AUTH_ENAB
 GITHUB_CALLBACK_URL = os.getenv("GITHUB_CALLBACK_URL", "https://sqs.chat/auth/github/callback") if GITHUB_AUTH_ENABLED else ""
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "100"))
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+DAILY_UPLOAD_LIMIT_MB = int(os.getenv("DAILY_UPLOAD_LIMIT_MB", "100"))
+MAX_RECORDING_MINUTES = int(os.getenv("MAX_RECORDING_MINUTES", "15"))
 SESSION_COOKIE_NAME = "sqs_session"
 SESSION_MAX_AGE_REMEMBER = 60 * 60 * 24 * 30
 SESSION_MAX_AGE_SHORT = 60 * 60 * 8
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "False").lower() in ("true", "1", "yes")
 COOKIE_SAMESITE = "lax"
-MIC_DAILY_LIMIT_SECONDS = 15 * 60
-UPLOAD_DAILY_LIMIT_MB = 100
+MIC_DAILY_LIMIT_SECONDS = MAX_RECORDING_MINUTES * 60
+UPLOAD_DAILY_LIMIT_MB = DAILY_UPLOAD_LIMIT_MB
 
 UPLOAD_DIR = "/app/uploads"
 DATA_DIR = "/app/data"
@@ -1213,18 +1215,18 @@ LANDING_PAGE_SIGNED_OUT = """<!DOCTYPE html>
         </div>
 
         <div class="section">
-            <p style="color:#a1a1aa;font-size:0.9rem;line-height:1.6;margin-bottom:1rem;">
-                Sign in with GitHub to start dictating. Choose your mode:
-            </p>
-            <ul>
-                <li><strong>Mic mode</strong> — Record short clips (5-20s ideal) for quick CPU notes</li>
-                <li><strong>Upload mode</strong> — Longer or higher-quality audio (up to 50 MB) using the better <code>small.en</code> model</li>
-            </ul>
-            <ul style="margin-top:0.75rem;">
-                <li>15-minute daily mic quota per user; 100 MB daily upload limit</li>
-                <li>Language selection (11 languages + auto-detect)</li>
-                <li>Anti-hallucination filtering for short clips</li>
-            </ul>
+                <p style="color:#a1a1aa;font-size:0.9rem;line-height:1.6;margin-bottom:1rem;">
+                    Sign in with GitHub to start dictating. Choose your mode:
+                </p>
+                <ul>
+                    <li><strong>Mic mode</strong> — Record short clips (5-20s ideal) for quick CPU notes</li>
+                    <li><strong>Upload mode</strong> — Longer or higher-quality audio (up to """ + str(MAX_FILE_SIZE_MB) + """ MB) using the better <code>small.en</code> model</li>
+                </ul>
+                <ul style="margin-top:0.75rem;">
+                    <li>Daily mic quota: """ + str(MAX_RECORDING_MINUTES) + """ min per user; daily upload quota: """ + str(UPLOAD_DAILY_LIMIT_MB) + """ MB</li>
+                    <li>Language selection (11 languages + auto-detect)</li>
+                    <li>Anti-hallucination filtering for short clips</li>
+                </ul>
         </div>
 
         <div class="cta-group" id="cta-group">
@@ -1360,8 +1362,8 @@ LANDING_PAGE_SIGNED_IN = """<!DOCTYPE html>
         <div class="section">
             <h2>Transcription Modes</h2>
             <ul>
-                <li><strong>Mic (record then transcribe)</strong> — Quick CPU notes, 5-20s ideal. 15 min/day quota.</li>
-                <li><strong>File upload</strong> — Longer audio/video files (up to 100 MB). Better quality model. 100 MB daily limit.</li>
+                    <li><strong>Mic (record then transcribe)</strong> — Quick CPU notes, 5-20s ideal. """ + str(MAX_RECORDING_MINUTES) + """ min/day quota.</li>
+                    <li><strong>File upload</strong> — Longer audio/video files (up to """ + str(MAX_FILE_SIZE_MB) + """ MB). Better quality model. """ + str(UPLOAD_DAILY_LIMIT_MB) + """ MB daily limit.</li>
                 <li><strong>Language selection</strong> — 11 languages supported</li>
             </ul>
         </div>
@@ -1692,7 +1694,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     <input type="file" id="audio-file" accept="audio/*,video/*">
                     <div class="drop-zone-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg></div>
                     <div class="drop-zone-label"><strong>Drop audio</strong> or click to browse</div>
-                    <div class="drop-zone-hint">For longer/higher-quality audio &middot; Max 100 MB</div>
+                    <div class="drop-zone-hint">For longer/higher-quality audio &middot; Max """ + str(MAX_FILE_SIZE_MB) + """ MB</div>
                 </label>
                 <div class="mic-btn" id="mic-btn" role="button" tabindex="0" title="Click to record">
                     <div class="mic-icon" id="mic-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg></div>
@@ -1763,14 +1765,14 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 <li>Click the mic button to start dictating</li>
                 <li>Speak naturally — short bursts of 5-20 seconds work best on this CPU server</li>
                 <li>Click stop to transcribe — the app sends your audio to Whisper</li>
-                <li>You have a daily limit of <strong>15 minutes</strong> per user (shown in the top bar)</li>
+                <li>You have a daily limit of <strong>""" + str(MAX_RECORDING_MINUTES) + """ minutes</strong> per user (shown in the top bar)</li>
                 <li>When the quota runs out, the mic button is disabled. Try upload instead.</li>
                 <li>Uses the <code>tiny.en</code> model for fast dictation turnaround</li>
             </ul>
 
             <h3>Upload Mode</h3>
             <ul>
-                <li>Drag and drop or click to browse audio/video files (up to """ + str(MAX_FILE_SIZE_MB) + """ MB, 100 MB daily limit)</li>
+                <li>Drag and drop or click to browse audio/video files (up to """ + str(MAX_FILE_SIZE_MB) + """ MB, """ + str(UPLOAD_DAILY_LIMIT_MB) + """ MB daily limit)</li>
                 <li>Uses the better <code>small.en</code> model for accurate transcription</li>
                 <li>Supports most audio/video formats via ffmpeg</li>
             </ul>
