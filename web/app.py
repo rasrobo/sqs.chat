@@ -482,7 +482,7 @@ async def app_page(request: Request):
                 page = page.replace("__MIC_LIMIT__", str(limit_min))
                 page = page.replace("__MIC_REMAINING_SEC__", str(int(mic["remaining"])))
                 page = page.replace("__MIC_LIMIT_SEC__", str(int(mic["limit"])))
-                return HTMLResponse(page)
+                return HTMLResponse(page, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     return RedirectResponse(url="/signin", status_code=303)
 
 
