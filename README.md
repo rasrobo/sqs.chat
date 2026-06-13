@@ -1,5 +1,7 @@
 # SQS Signal — Self-Hosted Open Source Dictation App
 
+**What's in it for you:** Dictate notes, emails, and documents without sending your audio to a cloud service. Everything runs locally on your own hardware using OpenAI Whisper — your speech data never leaves your server. No subscriptions, no per-minute fees, no privacy trade-offs.
+
 [![License: Sustainable Use](https://img.shields.io/badge/License-Sustainable%20Use-blue)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://python.org)
