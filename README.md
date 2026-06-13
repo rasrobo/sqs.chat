@@ -150,4 +150,6 @@ If you find this project useful, consider [supporting development on Ko-fi](http
 
 ---
 
-Built by [Ras Robo / Side Quest Studios](https://sidequeststudios.xyz)
+Built by [Side Quest Studios](https://sidequeststudios.xyz)
+
+*Keywords: speech-to-text, offline transcription, OpenAI Whisper, self-hosted dictation, open-source STT, private AI inference, Docker speech recognition*
