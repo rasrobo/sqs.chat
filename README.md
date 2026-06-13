@@ -146,10 +146,10 @@ All events logged to SQLite (`access_log` table) and rotating files (`access.log
 
 ## Support
 
-If you find this project useful, consider [supporting development on Ko-fi](https://ko-fi.com/sidequeststudios).
-
 ---
 
 Built by [Side Quest Studios](https://sidequeststudios.xyz)
+
+If you find this project useful, consider [supporting development on Ko-fi](https://ko-fi.com/sidequeststudios).
 
 *Keywords: speech-to-text, offline transcription, OpenAI Whisper, self-hosted dictation, open-source STT, private AI inference, Docker speech recognition*
