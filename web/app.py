@@ -2568,6 +2568,68 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('drag-over'); });
         dropZone.addEventListener('drop', function(e) { e.preventDefault(); dropZone.classList.remove('drag-over'); if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; fileInput.dispatchEvent(new Event('change')); } });
 
+        // ── Combined-transcript accumulator ────────────────────────────────
+        // Merges separate uploads into ONE continuous SRT. When you upload
+        // file 1, then file 2, then file 3 in separate actions, their segments
+        // are accumulated with running offsets so the result reads as a single
+        // recording. resetForm() clears it.
+        window.combinedSegments = [];
+        window.combinedOffset = 0;
+        window.combinedCount = 0;
+        function fmtSrtTime(sec) {
+            sec = Math.max(0, sec || 0);
+            var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+            var ms = Math.round((sec - Math.floor(sec)) * 1000);
+            return (h<10?'0':'')+h+':'+(m<10?'0':'')+m+':'+(s<10?'0':'')+s+','+(ms<100?(ms<10?'00':'0'):'')+ms;
+        }
+        function clientSegmentsToSrt(segs) {
+            var lines = [];
+            for (var i = 0; i < segs.length; i++) {
+                if (!segs[i].text) continue;
+                lines.push(String(i + 1));
+                lines.push(fmtSrtTime(segs[i].start) + ' --> ' + fmtSrtTime(segs[i].end));
+                lines.push(segs[i].text);
+                lines.push('');
+            }
+            return lines.join('\n');
+        }
+        function mergeSegments(res) {
+            // res = single-file or combined response with .segments
+            var segs = (res && res.segments) || [];
+            if (!segs.length) return 0;
+            if (res.combined && res.file_count > 1) {
+                // Server already merged a batch — adopt it wholesale.
+                window.combinedSegments = segs.map(function(s){return {start:s.start,end:s.end,text:s.text};});
+                var last = segs[segs.length - 1];
+                window.combinedOffset = last ? (last.end || 0) : 0;
+                window.combinedCount = res.file_count;
+                return window.combinedCount;
+            }
+            // Single file — offset + append to the running transcript.
+            var fileDur = 0;
+            for (var i = 0; i < segs.length; i++) {
+                var s = segs[i];
+                if (!s.text) continue;
+                fileDur = Math.max(fileDur, s.end || 0);
+                window.combinedSegments.push({
+                    start: Math.round(((s.start || 0) + window.combinedOffset) * 1000) / 1000,
+                    end: Math.round(((s.end || 0) + window.combinedOffset) * 1000) / 1000,
+                    text: s.text
+                });
+            }
+            window.combinedOffset += fileDur;
+            window.combinedCount += 1;
+            return window.combinedCount;
+        }
+        function renderCombined() {
+            var srt = clientSegmentsToSrt(window.combinedSegments);
+            resultTextValue = srt || ''; resultText.textContent = resultTextValue || 'No output';
+            resultPanel.classList.add('visible');
+            var fc = window.combinedCount;
+            var fcBadge = fc > 1 ? '<span class="result-meta-badge">' + fc + ' files combined</span>' : '';
+            resultMeta.innerHTML = '<span class="result-meta-badge">model:tiny.en</span><span class="result-meta-badge">lang:' + langSelect.value + '</span><span class="result-meta-badge">SRT</span>' + fcBadge;
+        }
+
         fileInput.addEventListener('change', function(e) {
             var fileList = e.target.files;
             if (!fileList || fileList.length === 0) return;
@@ -2594,16 +2656,14 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 debug('info', 'Response: ' + res.status + ' in ' + ms + 'ms');
                 return res.json().then(function(data) {
                     if (res.ok) {
-                        resultTextValue = data.srt || data.text || ''; resultText.textContent = resultTextValue || 'No output';
-                        resultPanel.classList.add('visible');
                         var model = data.model || '?'; var lang = data.language || '?';
                         var textLen = (data.text || '').length;
                         var fileCount = data.file_count || okFiles.length;
-                        debug('success', 'Transcription done | files=' + fileCount + ' model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
-                        debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
-                        var fcBadge = fileCount > 1 ? '<span class="result-meta-badge">' + fileCount + ' files combined</span>' : '';
-                        resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>' + fcBadge;
-                        setStatus('done', 'Complete', Math.round(ms / 1000) + 's'); showToast('Transcription ready');
+                        mergeSegments(data);
+                        renderCombined();
+                        debug('success', 'Transcription done | files=' + window.combinedCount + ' model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (resultTextValue || '').length);
+                        debug('info', 'SRT excerpt: ' + (resultTextValue || data.srt || data.text || '').substr(0, 120) + '...');
+                        setStatus('done', 'Complete', Math.round(ms / 1000) + 's · ' + window.combinedCount + ' file' + (window.combinedCount>1?'s':'') + ' combined'); showToast('Transcription ready');
                     } else {
                         var errorMsg = data.detail;
                         if (Array.isArray(data.detail)) {
@@ -2620,7 +2680,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
         window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var isSrt = text.indexOf(' --> ') !== -1; var ext = isSrt ? '.srt' : '.txt'; var mime = isSrt ? 'text/plain' : 'text/plain'; var blob = new Blob([text], { type: mime }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript' + ext; a.click(); URL.revokeObjectURL(url); };
-        window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
+        window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; window.combinedSegments = []; window.combinedOffset = 0; window.combinedCount = 0; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
             var overlay = document.getElementById("help-overlay");
