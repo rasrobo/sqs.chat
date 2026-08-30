@@ -2604,6 +2604,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             window.pendingFiles = [];
             // Session = everything we've picked so far this session (for combine).
             window.sessionFiles = window.sessionFiles.concat(batch);
+            window.sessionFiles.sort(function(a, b) { return a.name.localeCompare(b.name); });
             var file = batch[0];
             currentFileName = file.name;
             var formData = new FormData();
@@ -2655,6 +2656,11 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 window.pendingFiles.push(f);
             }
             if (window.pendingFiles.length === 0) return;
+            // Deterministic ordering: sort the batch by filename (case-insensitive)
+            // so the combined SRT pieces files in a sensible order regardless of
+            // picker click order. Files like part1.wav/part2.wav or timestamped
+            // names sort correctly.
+            window.pendingFiles.sort(function(a, b) { return a.name.localeCompare(b.name); });
             // Debounce: adding more files within the window re-arms the batch.
             if (window.batchTimer) { clearTimeout(window.batchTimer); }
             window.batchTimer = setTimeout(sendPendingBatch, BATCH_DEBOUNCE_MS);
