@@ -1939,7 +1939,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="input-row" id="input-row">
                 <label class="drop-zone" id="drop-zone" for="audio-file">
-                    <input type="file" id="audio-file" accept="audio/*,video/*">
+                    <input type="file" id="audio-file" accept="audio/*,video/*" multiple>
                     <div class="drop-zone-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg></div>
                     <div class="drop-zone-label"><strong>Drop audio</strong> or click to browse</div>
                     <div class="drop-zone-hint">For longer/higher-quality audio &middot; Max """ + str(MAX_FILE_SIZE_MB) + """ MB</div>
@@ -1982,6 +1982,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     <div class="result-actions">
                         <button class="icon-btn" onclick="copyResult()" title="Copy"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
                         <button class="icon-btn" onclick="downloadResult()" title="Download"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+                        <button class="icon-btn" onclick="combineMore()" title="Add more files to this transcript" style="color:#6366f1;"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></button>
                         <button class="icon-btn" onclick="resetForm()" title="New"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg></button>
                     </div>
                 </div>
@@ -2588,25 +2589,29 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         // ── Batch upload: multiple files (one action OR several) → ONE transcript ──
         // Files selected in a single picker action, or across rapid selections,
-        // are accumulated and sent together in ONE request. The server merges
-        // them in selection order into a single combined SRT (file 1 + file 2 + ...).
-        // A short debounce lets you add more files before the batch fires.
+        // accumulate and send together in ONE request. The server merges them in
+        // selection order into a single combined SRT. "Combine more" re-uploads the
+        // full session set with any newly added files so the transcript stays
+        // ordered correctly (server-authoritative).
         window.pendingFiles = [];
+        window.sessionFiles = [];
         window.batchTimer = null;
-        const BATCH_DEBOUNCE_MS = 800;
+        const BATCH_DEBOUNCE_MS = 2500;
         function sendPendingBatch() {
             if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; }
             if (window.pendingFiles.length === 0) return;
             var batch = window.pendingFiles;
             window.pendingFiles = [];
+            // Session = everything we've picked so far this session (for combine).
+            window.sessionFiles = window.sessionFiles.concat(batch);
             var file = batch[0];
             currentFileName = file.name;
             var formData = new FormData();
-            for (var j = 0; j < batch.length; j++) { formData.append('files', batch[j]); }
+            for (var j = 0; j < window.sessionFiles.length; j++) { formData.append('files', window.sessionFiles[j]); }
             formData.append('language', langSelect.value);
             resultPanel.classList.remove('visible');
-            var batchLabel = batch.length > 1 ? batch.length + ' files (combined)' : file.name;
-            debug('info', 'Upload started: ' + (batch.length > 1 ? batch.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
+            var batchLabel = window.sessionFiles.length > 1 ? window.sessionFiles.length + ' files (combined)' : file.name;
+            debug('info', 'Upload started: ' + (window.sessionFiles.length > 1 ? window.sessionFiles.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
             setStatus('active', 'Uploading', batchLabel);
             var t0 = Date.now();
             fetch('/transcribe', { method: 'POST', body: formData })
@@ -2617,7 +2622,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     if (res.ok) {
                         var model = data.model || '?'; var lang = data.language || '?';
                         var textLen = (data.text || '').length;
-                        var fileCount = data.file_count || batch.length;
+                        var fileCount = data.file_count || window.sessionFiles.length;
                         renderTranscription(data, fileCount);
                         debug('success', 'Transcription done | files=' + fileCount + (data.combined ? ' combined' : '') + ' model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
                         debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
@@ -2635,6 +2640,12 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                 });
             }).catch(function(err) { debug('error', 'Network error: ' + err.message); setStatus('error', 'Network error', err.message); showToast('Network error'); });
         }
+        window.combineMore = function() {
+            if (window.sessionFiles.length === 0) return;
+            fileInput.value = '';  // allow re-picking the same files
+            showToast('Pick more files to add to this transcript');
+            fileInput.click();
+        };
         fileInput.addEventListener('change', function(e) {
             var fileList = e.target.files;
             if (!fileList || fileList.length === 0) return;
@@ -2654,7 +2665,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
         window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var isSrt = text.indexOf(' --> ') !== -1; var ext = isSrt ? '.srt' : '.txt'; var mime = isSrt ? 'text/plain' : 'text/plain'; var blob = new Blob([text], { type: mime }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript' + ext; a.click(); URL.revokeObjectURL(url); };
-        window.resetForm = function() { if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; } window.pendingFiles = []; fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
+        window.resetForm = function() { if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; } window.pendingFiles = []; window.sessionFiles = []; fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
             var overlay = document.getElementById("help-overlay");
