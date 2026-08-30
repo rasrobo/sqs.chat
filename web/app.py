@@ -2586,24 +2586,27 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>' + fcBadge;
         }
 
-        fileInput.addEventListener('change', function(e) {
-            var fileList = e.target.files;
-            if (!fileList || fileList.length === 0) return;
-            var okFiles = [];
-            for (var i = 0; i < fileList.length; i++) {
-                var f = fileList[i];
-                if (f.size > """ + str(MAX_FILE_SIZE) + """) { showToast('File exceeds """ + str(MAX_FILE_SIZE_MB) + """ MB limit: ' + f.name); debug('warn', 'File too large: ' + f.name + ' ' + f.size + ' bytes'); continue; }
-                okFiles.push(f);
-            }
-            if (okFiles.length === 0) return;
-            var file = okFiles[0];
+        // ── Batch upload: multiple files (one action OR several) → ONE transcript ──
+        // Files selected in a single picker action, or across rapid selections,
+        // are accumulated and sent together in ONE request. The server merges
+        // them in selection order into a single combined SRT (file 1 + file 2 + ...).
+        // A short debounce lets you add more files before the batch fires.
+        window.pendingFiles = [];
+        window.batchTimer = null;
+        const BATCH_DEBOUNCE_MS = 800;
+        function sendPendingBatch() {
+            if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; }
+            if (window.pendingFiles.length === 0) return;
+            var batch = window.pendingFiles;
+            window.pendingFiles = [];
+            var file = batch[0];
             currentFileName = file.name;
             var formData = new FormData();
-            for (var j = 0; j < okFiles.length; j++) { formData.append('files', okFiles[j]); }
+            for (var j = 0; j < batch.length; j++) { formData.append('files', batch[j]); }
             formData.append('language', langSelect.value);
             resultPanel.classList.remove('visible');
-            var batchLabel = okFiles.length > 1 ? okFiles.length + ' files' : file.name;
-            debug('info', 'Upload started: ' + (okFiles.length > 1 ? okFiles.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
+            var batchLabel = batch.length > 1 ? batch.length + ' files (combined)' : file.name;
+            debug('info', 'Upload started: ' + (batch.length > 1 ? batch.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
             setStatus('active', 'Uploading', batchLabel);
             var t0 = Date.now();
             fetch('/transcribe', { method: 'POST', body: formData })
@@ -2614,7 +2617,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     if (res.ok) {
                         var model = data.model || '?'; var lang = data.language || '?';
                         var textLen = (data.text || '').length;
-                        var fileCount = data.file_count || okFiles.length;
+                        var fileCount = data.file_count || batch.length;
                         renderTranscription(data, fileCount);
                         debug('success', 'Transcription done | files=' + fileCount + (data.combined ? ' combined' : '') + ' model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
                         debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
@@ -2631,11 +2634,27 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     }
                 });
             }).catch(function(err) { debug('error', 'Network error: ' + err.message); setStatus('error', 'Network error', err.message); showToast('Network error'); });
+        }
+        fileInput.addEventListener('change', function(e) {
+            var fileList = e.target.files;
+            if (!fileList || fileList.length === 0) return;
+            for (var i = 0; i < fileList.length; i++) {
+                var f = fileList[i];
+                if (f.size > """ + str(MAX_FILE_SIZE) + """) { showToast('File exceeds """ + str(MAX_FILE_SIZE_MB) + """ MB limit: ' + f.name); debug('warn', 'File too large: ' + f.name + ' ' + f.size + ' bytes'); continue; }
+                window.pendingFiles.push(f);
+            }
+            if (window.pendingFiles.length === 0) return;
+            // Debounce: adding more files within the window re-arms the batch.
+            if (window.batchTimer) { clearTimeout(window.batchTimer); }
+            window.batchTimer = setTimeout(sendPendingBatch, BATCH_DEBOUNCE_MS);
+            var names = window.pendingFiles.map(function(x){return x.name;}).join(', ');
+            debug('info', 'Queued ' + window.pendingFiles.length + ' file(s): ' + names);
+            setStatus('active', 'Selected ' + window.pendingFiles.length + ' file(s)', 'Sending together as one transcript...');
         });
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
         window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var isSrt = text.indexOf(' --> ') !== -1; var ext = isSrt ? '.srt' : '.txt'; var mime = isSrt ? 'text/plain' : 'text/plain'; var blob = new Blob([text], { type: mime }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript' + ext; a.click(); URL.revokeObjectURL(url); };
-        window.resetForm = function() { fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
+        window.resetForm = function() { if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; } window.pendingFiles = []; fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
             var overlay = document.getElementById("help-overlay");
