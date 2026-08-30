@@ -1,4 +1,7 @@
-# SQS Signal — Self-Hosted Open Source Dictation App
+# SQS Echo — Self-Hosted Open Source Dictation App
+
+> **Codename:** Echo. The transcription service (browser UI at sqs.chat +
+> programmatic API). Internally still referenced as SQS Signal in places.
 
 **What's in it for you:** Dictate notes, emails, and documents without sending your audio to a cloud service. Everything runs locally on your own hardware using OpenAI Whisper — your speech data never leaves your server. No subscriptions, no per-minute fees, no privacy trade-offs.
 
@@ -7,7 +10,15 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 
-**SQS Signal** is a self-hosted dictation app that turns speech into text using [OpenAI Whisper](https://github.com/openai/whisper). Speak your drafts, notes, prompts, and memos faster than you'd type them — all on your own infrastructure with GitHub OAuth. Optional daily quotas apply when GitHub auth is enabled.
+**SQS Echo** is a self-hosted dictation app that turns speech into text using [OpenAI Whisper](https://github.com/openai/whisper). Speak your drafts, notes, prompts, and memos faster than you'd type them — all on your own infrastructure with GitHub OAuth. Optional daily quotas apply when GitHub auth is enabled.
+
+## Programmatic API
+
+`POST /api/v1/transcribe` — API-key auth (`X-API-Key` header or Bearer), accepts
+one or more files and returns **one combined SRT** (multiple files are merged
+into a single continuous transcript in upload order). Key from the vault
+(`sqs_chat_api_key`), rate-limited, never logged. See
+`claw-way-django/docs/ops/sqs-chat-transcription-api.md` for full docs and examples.
 
 ## Why dictation?
 
@@ -127,6 +138,7 @@ Then restart the stack:
 | `MAX_FILE_SIZE_MB` | No | `50` | Max uploaded file size in MB. Increase for large files (e.g. `500`). Larger files need more CPU time — adjust `read_timeout` in Caddyfile accordingly. |
 | `DAILY_UPLOAD_LIMIT_MB` | No | `100` | Max total upload size per user per day (only when `GITHUB_AUTH_ENABLED=true`) |
 | `MAX_RECORDING_MINUTES` | No | `15` | Max mic recording time per user per day (only when `GITHUB_AUTH_ENABLED=true`) |
+| `UNLIMITED_USERNAMES` | No | `rasrobo` | Comma-separated GitHub usernames exempt from daily mic/upload quotas |
 | `COOKIE_SECURE` | No | `False` | Set `True` for HTTPS production |
 
 ## Quota System
@@ -135,6 +147,7 @@ Quotas only apply when `GITHUB_AUTH_ENABLED=true`. Without auth, all users are a
 
 - **Mic**: 15 minutes per user per day (resets at midnight UTC). Configurable via `MAX_RECORDING_MINUTES`.
 - **Upload**: 100 MB per user per day. Configurable via `DAILY_UPLOAD_LIMIT_MB`.
+- **Unlimited users**: GitHub usernames listed in `UNLIMITED_USERNAMES` (default `rasrobo`) are exempt from both daily quotas — the UI shows "Unlimited".
 - Quotas enforced server-side with SQLite — users see remaining time/quota in the UI.
 - When mic quota is exhausted, users are prompted to use upload mode instead.
 

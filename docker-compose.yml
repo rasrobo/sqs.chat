@@ -35,6 +35,7 @@ services:
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
       - DAILY_UPLOAD_LIMIT_MB=${DAILY_UPLOAD_LIMIT_MB:-100}
       - MAX_RECORDING_MINUTES=${MAX_RECORDING_MINUTES:-15}
+      - UNLIMITED_USERNAMES=${UNLIMITED_USERNAMES:-rasrobo}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads

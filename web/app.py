@@ -12,7 +12,7 @@ import threading
 import asyncio
 import json as json_lib
 from datetime import datetime, timedelta, date
-from typing import Optional
+from typing import Optional, List
 from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect
@@ -100,6 +100,13 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "False").lower() in ("true", "1", "ye
 COOKIE_SAMESITE = "lax"
 MIC_DAILY_LIMIT_SECONDS = MAX_RECORDING_MINUTES * 60
 UPLOAD_DAILY_LIMIT_MB = DAILY_UPLOAD_LIMIT_MB
+# GitHub usernames exempt from daily quotas (comma-separated). Default: rasrobo.
+UNLIMITED_USERNAMES = {u.strip().lower() for u in os.getenv("UNLIMITED_USERNAMES", "rasrobo").split(",") if u.strip()}
+# API key for programmatic transcription (/api/v1/transcribe). Injected from the
+# claw-way-django vault at deploy time — never committed. Empty = API disabled.
+SQS_CHAT_API_KEY = os.getenv("SQS_CHAT_API_KEY", "").strip()
+# API key rate limit (requests per minute per key, simple in-memory window).
+API_RATE_LIMIT_PER_MIN = int(os.getenv("API_RATE_LIMIT_PER_MIN", "20"))
 
 UPLOAD_DIR = "/app/uploads"
 DATA_DIR = "/app/data"
@@ -328,8 +335,15 @@ def log_access(user_id, username, action, detail="", ip=""):
         error_logger.error(f"log_access failed: {e}")
 
 
-def check_mic_quota(user_id, additional_seconds=0):
+def is_unlimited_user(username=""):
+    """True when the GitHub username is exempt from daily quotas."""
+    return bool(username) and username.strip().lower() in UNLIMITED_USERNAMES
+
+
+def check_mic_quota(user_id, additional_seconds=0, username=""):
     if not IS_QUOTA_ENABLED:
+        return True
+    if is_unlimited_user(username):
         return True
     today = date.today().isoformat()
     conn = get_db()
@@ -341,8 +355,10 @@ def check_mic_quota(user_id, additional_seconds=0):
     return (used + additional_seconds) <= MIC_DAILY_LIMIT_SECONDS
 
 
-def get_mic_usage(user_id):
+def get_mic_usage(user_id, username=""):
     if not IS_QUOTA_ENABLED:
+        return {"used": 0, "remaining": 999999, "limit": 999999}
+    if is_unlimited_user(username):
         return {"used": 0, "remaining": 999999, "limit": 999999}
     today = date.today().isoformat()
     conn = get_db()
@@ -355,8 +371,10 @@ def get_mic_usage(user_id):
     return {"used": used, "remaining": remaining, "limit": MIC_DAILY_LIMIT_SECONDS}
 
 
-def record_mic_usage(user_id, seconds):
+def record_mic_usage(user_id, seconds, username=""):
     if not IS_QUOTA_ENABLED:
+        return
+    if is_unlimited_user(username):
         return
     today = date.today().isoformat()
     conn = get_db()
@@ -370,8 +388,10 @@ def record_mic_usage(user_id, seconds):
     conn.close()
 
 
-def check_upload_quota(user_id, additional_mb=0):
+def check_upload_quota(user_id, additional_mb=0, username=""):
     if not IS_QUOTA_ENABLED:
+        return True
+    if is_unlimited_user(username):
         return True
     today = date.today().isoformat()
     conn = get_db()
@@ -383,8 +403,10 @@ def check_upload_quota(user_id, additional_mb=0):
     return (used + additional_mb) <= UPLOAD_DAILY_LIMIT_MB
 
 
-def get_upload_usage(user_id):
+def get_upload_usage(user_id, username=""):
     if not IS_QUOTA_ENABLED:
+        return {"used": 0, "remaining": 999999, "limit": 999999}
+    if is_unlimited_user(username):
         return {"used": 0, "remaining": 999999, "limit": 999999}
     today = date.today().isoformat()
     conn = get_db()
@@ -397,8 +419,10 @@ def get_upload_usage(user_id):
     return {"used": used, "remaining": remaining, "limit": UPLOAD_DAILY_LIMIT_MB}
 
 
-def record_upload_usage(user_id, mb):
+def record_upload_usage(user_id, mb, username=""):
     if not IS_QUOTA_ENABLED:
+        return
+    if is_unlimited_user(username):
         return
     today = date.today().isoformat()
     conn = get_db()
@@ -426,6 +450,81 @@ async def get_current_user(request: Request):
                     "auth_method": session.get("auth_method", "github"),
                 }
     raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# ---------------------------------------------------------------------------
+# Programmatic API auth (POST /api/v1/transcribe) — best-practice, tight
+# ---------------------------------------------------------------------------
+
+_api_rate_buckets = {}  # api_key -> list of timestamps (per-minute window)
+_api_rate_lock = threading.Lock()
+
+
+def _api_key_valid(provided: str) -> bool:
+    """Constant-time comparison against the vault-injected key. Never logs it."""
+    if not SQS_CHAT_API_KEY or not provided:
+        return False
+    return secrets.compare_digest(provided, SQS_CHAT_API_KEY)
+
+
+def _api_rate_allowed(key: str) -> bool:
+    """Simple in-memory sliding-window rate limit per key (thread-safe)."""
+    now = time.time()
+    window_start = now - 60.0
+    with _api_rate_lock:
+        bucket = [t for t in _api_rate_buckets.get(key, []) if t > window_start]
+        if len(bucket) >= API_RATE_LIMIT_PER_MIN:
+            return False
+        bucket.append(now)
+        _api_rate_buckets[key] = bucket
+        return True
+
+
+async def require_api_key(
+    x_api_key: str = Header(None),
+    authorization: str = Header(None),
+):
+    """FastAPI dependency enforcing API-key auth (X-API-Key or Bearer)."""
+    if not SQS_CHAT_API_KEY:
+        raise HTTPException(status_code=503, detail="API not configured")
+    provided = (x_api_key or "").strip()
+    if not provided and authorization:
+        if authorization.lower().startswith("bearer "):
+            provided = authorization[7:].strip()
+    if not provided:
+        raise HTTPException(status_code=401, detail="Missing API key")
+    if not _api_key_valid(provided):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not _api_rate_allowed(provided):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded, try again shortly")
+    return provided
+
+
+def _merge_segments(per_file: List[dict]):
+    """Merge per-file whisper results into one continuous segment list.
+
+    Offsets each subsequent file's timestamps by the running total duration so
+    the combined SRT reads as one continuous recording (file 1 + file 2 + ...).
+    Returns (segments, files_summary).
+    """
+    combined = []
+    offset = 0.0
+    files_summary = []
+    for res in per_file:
+        segs = res.get("segments", [])
+        files_summary.append({"filename": res.get("filename", ""), "text": res.get("text", "")})
+        if not segs:
+            continue
+        file_duration = max((s.get("end") or 0) for s in segs)
+        for s in segs:
+            combined.append({
+                "start": round((s.get("start") or 0) + offset, 3),
+                "end": round((s.get("end") or 0) + offset, 3),
+                "text": (s.get("text") or "").strip(),
+            })
+        offset += file_duration
+    combined = [c for c in combined if c["text"]]
+    return combined, files_summary
 
 
 async def optional_user(request: Request):
@@ -523,7 +622,7 @@ async def auth_github_status(user: dict = Depends(optional_user)):
         return {"authenticated": False, "github_auth_enabled": False, "quotas_enabled": IS_QUOTA_ENABLED}
     if not user:
         return {"authenticated": False, "github_auth_enabled": True, "quotas_enabled": IS_QUOTA_ENABLED}
-    mic_usage = get_mic_usage(user["user_id"]) if user.get("user_id") else {"used": 0, "remaining": 999999, "limit": 999999}
+    mic_usage = get_mic_usage(user["user_id"], user.get("username", "")) if user.get("user_id") else {"used": 0, "remaining": 999999, "limit": 999999}
     return {
         "authenticated": True,
         "github_auth_enabled": True,
@@ -557,17 +656,23 @@ async def app_page(request: Request):
                 username = session.get("username", "")
                 avatar_url = session.get("avatar_url", "")
                 auth_method = session.get("auth_method", "pat")
-                mic = get_mic_usage(user_id) if user_id else {"used": 0, "remaining": 0, "limit": MIC_DAILY_LIMIT_SECONDS}
+                mic = get_mic_usage(user_id, username) if user_id else {"used": 0, "remaining": 0, "limit": MIC_DAILY_LIMIT_SECONDS}
                 remaining_min = int(mic["remaining"] / 60)
                 limit_min = int(mic["limit"] / 60)
                 page = APP_PAGE_TEMPLATE
                 page = page.replace("__USERNAME__", username)
                 page = page.replace("__AVATAR_URL__", avatar_url)
                 page = page.replace("__AUTH_METHOD__", auth_method)
-                page = page.replace("__MIC_REMAINING__", str(remaining_min))
-                page = page.replace("__MIC_LIMIT__", str(limit_min))
-                page = page.replace("__MIC_REMAINING_SEC__", str(int(mic["remaining"])))
-                page = page.replace("__MIC_LIMIT_SEC__", str(int(mic["limit"])))
+                if is_unlimited_user(username):
+                    page = page.replace("__MIC_REMAINING__", "Unlimited")
+                    page = page.replace("__MIC_LIMIT__", "Unlimited")
+                    page = page.replace("__MIC_REMAINING_SEC__", str(MIC_DAILY_LIMIT_SECONDS))
+                    page = page.replace("__MIC_LIMIT_SEC__", str(MIC_DAILY_LIMIT_SECONDS))
+                else:
+                    page = page.replace("__MIC_REMAINING__", str(remaining_min))
+                    page = page.replace("__MIC_LIMIT__", str(limit_min))
+                    page = page.replace("__MIC_REMAINING_SEC__", str(int(mic["remaining"])))
+                    page = page.replace("__MIC_LIMIT_SEC__", str(int(mic["limit"])))
                 page = page.replace("__QUOTAS_ENABLED__", "true" if IS_QUOTA_ENABLED else "false")
                 return HTMLResponse(page, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     return RedirectResponse(url="/signin", status_code=303)
@@ -1061,75 +1166,154 @@ def _format_srt_time(seconds):
 @app.post("/transcribe")
 async def transcribe(
     request: Request,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     language: str = Form("en"),
     auth: dict = Depends(get_current_user)
 ):
+    """Transcribe one or more uploaded files, returning ONE combined SRT.
+
+    Files are transcribed in upload order and merged into a single continuous
+    transcript (file 1 + file 2 + ...). The response carries combined segments
+    with continuous timestamps plus per-file summaries.
+    """
     import time as _time
     start_time = _time.time()
 
-    if not file.content_type or not (file.content_type.startswith("audio/") or file.content_type.startswith("video/")):
-        raise HTTPException(status_code=400, detail="File must be audio or video")
-    if file.size and file.size > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail=f"File too large. Max {MAX_FILE_SIZE_MB}MB")
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
 
-    file_size_mb = (file.size or 0) / (1024 * 1024)
-    file_size_kb_input = (file.size or 0) / 1024
-    if not check_upload_quota(auth.get("user_id", ""), file_size_mb):
-        used = get_upload_usage(auth.get("user_id", ""))["used"]
+    # Quota: sum of all file sizes in this batch.
+    total_mb = sum((f.size or 0) for f in files) / (1024 * 1024)
+    if not check_upload_quota(auth.get("user_id", ""), total_mb, auth.get("username", "")):
+        used = get_upload_usage(auth.get("user_id", ""), auth.get("username", ""))["used"]
         raise HTTPException(
             status_code=429,
             detail=f"Upload limit reached ({UPLOAD_DAILY_LIMIT_MB}MB/day). Used {used:.1f}MB today."
         )
 
-    suffix = file.filename.split(".")[-1] if "." in file.filename else "tmp"
-    tmp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{suffix}")
-    try:
-        t0 = _time.time()
-        with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        save_sec = _time.time() - t0
-        file_size_kb = os.path.getsize(tmp_path) / 1024
+    per_file = []
+    for file in files:
+        if not file.content_type or not (file.content_type.startswith("audio/") or file.content_type.startswith("video/")):
+            raise HTTPException(status_code=400, detail=f"{file.filename}: must be audio or video")
+        if file.size and file.size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail=f"{file.filename}: too large. Max {MAX_FILE_SIZE_MB}MB")
 
-        print(f"[UPLOAD] file={file.filename} input_kb={file_size_kb_input:.0f} saved_kb={file_size_kb:.0f} save_sec={save_sec:.1f}", flush=True)
+        suffix = file.filename.split(".")[-1] if "." in file.filename else "tmp"
+        tmp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{suffix}")
+        try:
+            with open(tmp_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            file_size_kb = os.path.getsize(tmp_path) / 1024
 
-        t1 = _time.time()
-        async with httpx.AsyncClient(timeout=1800.0) as client:
-            with open(tmp_path, "rb") as f:
-                form_data = {"file": (file.filename, f, file.content_type)}
-                data = {"language": language if language != "auto" else "en", "model_name": "tiny.en"}
-                resp = await client.post(
-                    f"{WHISPER_SERVICE_URL}/transcribe",
-                    files=form_data, data=data
-                )
-        whisper_sec = _time.time() - t1
-        print(f"[UPLOAD] whisper_sec={whisper_sec:.1f} status={resp.status_code}", flush=True)
+            async with httpx.AsyncClient(timeout=1800.0) as client:
+                with open(tmp_path, "rb") as f:
+                    form_data = {"file": (file.filename, f, file.content_type)}
+                    data = {"language": language if language != "auto" else "en", "model_name": "tiny.en"}
+                    resp = await client.post(
+                        f"{WHISPER_SERVICE_URL}/transcribe",
+                        files=form_data, data=data
+                    )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=500, detail=resp.text)
+            per_file.append(resp.json())
+            print(f"[UPLOAD] file={file.filename} kb={file_size_kb:.0f} whisper_ok", flush=True)
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail=f"{file.filename}: transcription timed out")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
-        if resp.status_code != 200:
-            raise HTTPException(status_code=500, detail=resp.text)
+    elapsed = _time.time() - start_time
+    combined_segments, files_summary = _merge_segments(per_file)
+    combined_text = " ".join(r.get("text", "").strip() for r in per_file if r.get("text"))
+    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
 
-        elapsed = _time.time() - start_time
-        result = resp.json()
-        text = result.get("text", "")
-        segments = result.get("segments", [])
-        srt_text = segments_to_srt(segments) if segments else text
-        result["srt"] = srt_text
-        result["format"] = "srt"
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload file_kb={file_size_kb:.0f} transcribe_sec={elapsed:.1f} whisper_sec={whisper_sec:.1f} save_sec={save_sec:.1f} result_len={len(text)} srt_len={len(srt_text)} result=success", flush=True)
+    result = {
+        "text": combined_text,
+        "segments": combined_segments,
+        "srt": srt_text,
+        "format": "srt",
+        "language": language,
+        "model": "tiny.en",
+        "files": files_summary,
+        "file_count": len(per_file),
+        "combined": True,
+    }
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload files={len(per_file)} transcribe_sec={elapsed:.1f} result_len={len(combined_text)} srt_len={len(srt_text)} result=success", flush=True)
 
-        log_access(auth.get("user_id", ""), auth.get("username", ""), "transcribe", f"upload {file_size_kb:.0f}kb", request.client.host if request.client else "")
-        record_upload_usage(auth.get("user_id", ""), file_size_mb)
+    total_kb = sum(r.get("text", "").__len__() for r in per_file)  # cheap log field
+    log_access(auth.get("user_id", ""), auth.get("username", ""), "transcribe",
+               f"{len(per_file)} files", request.client.host if request.client else "")
+    record_upload_usage(auth.get("user_id", ""), total_mb, auth.get("username", ""))
+    return result
 
-        return result
-    except httpx.TimeoutException:
-        elapsed = _time.time() - start_time
-        print(f"[UPLOAD] httpx timeout after {elapsed:.0f}s for file={file.filename} size_kb={file_size_kb:.0f}", flush=True)
-        raise HTTPException(status_code=504, detail="Transcription timed out")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+
+@app.post("/api/v1/transcribe")
+async def api_v1_transcribe(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    language: str = Form("en"),
+    api_key: str = Depends(require_api_key),
+):
+    """Programmatic transcription API (API-key auth). Returns combined SRT.
+
+    Headers: X-API-Key: <vault key>  (or Authorization: Bearer <key>)
+    Body:    multipart/form-data, field `files` (one or more), optional language.
+    Response: {text, segments, srt, format, language, model, files, file_count, combined}
+    """
+    import time as _time
+    start_time = _time.time()
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    per_file = []
+    for file in files:
+        if not file.content_type or not (file.content_type.startswith("audio/") or file.content_type.startswith("video/")):
+            raise HTTPException(status_code=400, detail=f"{file.filename}: must be audio or video")
+        if file.size and file.size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail=f"{file.filename}: too large. Max {MAX_FILE_SIZE_MB}MB")
+
+        suffix = file.filename.split(".")[-1] if "." in file.filename else "tmp"
+        tmp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{suffix}")
+        try:
+            with open(tmp_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            async with httpx.AsyncClient(timeout=1800.0) as client:
+                with open(tmp_path, "rb") as f:
+                    form_data = {"file": (file.filename, f, file.content_type)}
+                    data = {"language": language if language != "auto" else "en", "model_name": "tiny.en"}
+                    resp = await client.post(
+                        f"{WHISPER_SERVICE_URL}/transcribe",
+                        files=form_data, data=data
+                    )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=500, detail=resp.text)
+            per_file.append(resp.json())
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail=f"{file.filename}: transcription timed out")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    elapsed = _time.time() - start_time
+    combined_segments, files_summary = _merge_segments(per_file)
+    combined_text = " ".join(r.get("text", "").strip() for r in per_file if r.get("text"))
+    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
+
+    result = {
+        "text": combined_text,
+        "segments": combined_segments,
+        "srt": srt_text,
+        "format": "srt",
+        "language": language,
+        "model": "tiny.en",
+        "files": files_summary,
+        "file_count": len(per_file),
+        "combined": True,
+    }
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] files={len(per_file)} transcribe_sec={elapsed:.1f} srt_len={len(srt_text)}", flush=True)
+    return result
 
 
 @app.get("/favicon.ico")
@@ -2385,15 +2569,24 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         dropZone.addEventListener('drop', function(e) { e.preventDefault(); dropZone.classList.remove('drag-over'); if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; fileInput.dispatchEvent(new Event('change')); } });
 
         fileInput.addEventListener('change', function(e) {
-            var file = e.target.files[0];
-            if (!file) return;
-            if (file.size > """ + str(MAX_FILE_SIZE) + """) { showToast('File exceeds """ + str(MAX_FILE_SIZE_MB) + """ MB limit'); debug('warn', 'File too large: ' + file.size + ' bytes'); return; }
+            var fileList = e.target.files;
+            if (!fileList || fileList.length === 0) return;
+            var okFiles = [];
+            for (var i = 0; i < fileList.length; i++) {
+                var f = fileList[i];
+                if (f.size > """ + str(MAX_FILE_SIZE) + """) { showToast('File exceeds """ + str(MAX_FILE_SIZE_MB) + """ MB limit: ' + f.name); debug('warn', 'File too large: ' + f.name + ' ' + f.size + ' bytes'); continue; }
+                okFiles.push(f);
+            }
+            if (okFiles.length === 0) return;
+            var file = okFiles[0];
             currentFileName = file.name;
             var formData = new FormData();
-            formData.append('file', file); formData.append('language', langSelect.value);
+            for (var j = 0; j < okFiles.length; j++) { formData.append('files', okFiles[j]); }
+            formData.append('language', langSelect.value);
             resultPanel.classList.remove('visible');
-            debug('info', 'Upload started: ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB) lang=' + langSelect.value);
-            setStatus('active', 'Uploading', file.name);
+            var batchLabel = okFiles.length > 1 ? okFiles.length + ' files' : file.name;
+            debug('info', 'Upload started: ' + (okFiles.length > 1 ? okFiles.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
+            setStatus('active', 'Uploading', batchLabel);
             var t0 = Date.now();
             fetch('/transcribe', { method: 'POST', body: formData })
             .then(function(res) {
@@ -2405,9 +2598,11 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                         resultPanel.classList.add('visible');
                         var model = data.model || '?'; var lang = data.language || '?';
                         var textLen = (data.text || '').length;
-                        debug('success', 'Transcription done | model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
+                        var fileCount = data.file_count || okFiles.length;
+                        debug('success', 'Transcription done | files=' + fileCount + ' model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
                         debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
-                        resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>';
+                        var fcBadge = fileCount > 1 ? '<span class="result-meta-badge">' + fileCount + ' files combined</span>' : '';
+                        resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>' + fcBadge;
                         setStatus('done', 'Complete', Math.round(ms / 1000) + 's'); showToast('Transcription ready');
                     } else {
                         var errorMsg = data.detail;
