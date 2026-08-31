@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, date
 from typing import Optional, List
 from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends, Request, Response, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
@@ -1170,15 +1170,14 @@ async def transcribe(
     language: str = Form("en"),
     auth: dict = Depends(get_current_user)
 ):
-    """Transcribe one or more uploaded files, returning ONE combined SRT.
+    """Submit one or more files for transcription; returns job ids immediately.
 
-    Files are transcribed in upload order and merged into a single continuous
-    transcript (file 1 + file 2 + ...). The response carries combined segments
-    with continuous timestamps plus per-file summaries.
+    Files are transcribed in selection order (server-merged into one combined
+    SRT). The response is fast: it just hands each file to the whisper
+    /transcribe-async endpoint and returns the job ids. The browser polls
+    /transcribe/status?jobs=... for progress, then /transcribe/result?jobs=...
+    for the combined SRT.
     """
-    import time as _time
-    start_time = _time.time()
-
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
 
@@ -1191,7 +1190,7 @@ async def transcribe(
             detail=f"Upload limit reached ({UPLOAD_DAILY_LIMIT_MB}MB/day). Used {used:.1f}MB today."
         )
 
-    per_file = []
+    jobs = []
     for file in files:
         if not file.content_type or not (file.content_type.startswith("audio/") or file.content_type.startswith("video/")):
             raise HTTPException(status_code=400, detail=f"{file.filename}: must be audio or video")
@@ -1205,29 +1204,104 @@ async def transcribe(
                 shutil.copyfileobj(file.file, f)
             file_size_kb = os.path.getsize(tmp_path) / 1024
 
-            async with httpx.AsyncClient(timeout=1800.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 with open(tmp_path, "rb") as f:
                     form_data = {"file": (file.filename, f, file.content_type)}
                     data = {"language": language if language != "auto" else "en", "model_name": "tiny.en"}
                     resp = await client.post(
-                        f"{WHISPER_SERVICE_URL}/transcribe",
+                        f"{WHISPER_SERVICE_URL}/transcribe-async",
                         files=form_data, data=data
                     )
             if resp.status_code != 200:
                 raise HTTPException(status_code=500, detail=resp.text)
-            per_file.append(resp.json())
-            print(f"[UPLOAD] file={file.filename} kb={file_size_kb:.0f} whisper_ok", flush=True)
+            job = resp.json()
+            jobs.append({"job_id": job.get("job_id"), "filename": file.filename})
+            print(f"[UPLOAD] file={file.filename} kb={file_size_kb:.0f} job={job.get('job_id','')[:8]}", flush=True)
         except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail=f"{file.filename}: transcription timed out")
+            raise HTTPException(status_code=504, detail=f"{file.filename}: upload timed out")
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-    elapsed = _time.time() - start_time
-    combined_segments, files_summary = _merge_segments(per_file)
-    combined_text = " ".join(r.get("text", "").strip() for r in per_file if r.get("text"))
-    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
+    record_upload_usage(auth.get("user_id", ""), total_mb, auth.get("username", ""))
+    return {
+        "status": "queued",
+        "jobs": jobs,
+        "file_count": len(jobs),
+        "combined": True,
+    }
 
+
+@app.get("/transcribe/status")
+async def transcribe_status(
+    jobs: str = Query("", description="Comma-separated job ids"),
+    auth: dict = Depends(get_current_user),
+):
+    """Aggregate progress across whisper jobs. Returns per-job + overall %."""
+    job_ids = [j for j in jobs.split(",") if j]
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="No jobs")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        tasks = [client.get(f"{WHISPER_SERVICE_URL}/progress/{jid}") for jid in job_ids]
+        import asyncio as _aio
+        results = await _aio.gather(*tasks, return_exceptions=True)
+    overall = 0.0
+    per = []
+    all_done = True
+    any_error = False
+    for jid, r in zip(job_ids, results):
+        if isinstance(r, Exception):
+            per.append({"job_id": jid, "status": "error", "progress": 0})
+            any_error = True
+            continue
+        try:
+            d = r.json()
+        except Exception:
+            per.append({"job_id": jid, "status": "error", "progress": 0})
+            any_error = True
+            continue
+        overall += float(d.get("progress", 0))
+        per.append({"job_id": jid, "status": d.get("status"), "progress": float(d.get("progress", 0))})
+        if d.get("status") != "done":
+            all_done = False
+        if d.get("status") == "error":
+            any_error = True
+    overall = overall / len(job_ids)
+    return {
+        "status": "error" if any_error else ("done" if all_done else "running"),
+        "progress_pct": round(overall * 100, 1),
+        "jobs": per,
+    }
+
+
+@app.get("/transcribe/result")
+async def transcribe_result(
+    jobs: str = Query("", description="Comma-separated job ids"),
+    language: str = Form("en"),
+    auth: dict = Depends(get_current_user),
+):
+    """Fetch finished whisper jobs and merge them into one combined SRT."""
+    job_ids = [j for j in jobs.split(",") if j]
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="No jobs")
+    per_file = []
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for jid in job_ids:
+            r = await client.get(f"{WHISPER_SERVICE_URL}/result/{jid}")
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("status") == "done":
+                    per_file.append(d)
+                # delete to free memory
+                try:
+                    await client.delete(f"{WHISPER_SERVICE_URL}/jobs/{jid}")
+                except Exception:
+                    pass
+    if not per_file:
+        raise HTTPException(status_code=202, detail="Not all jobs done yet")
+    combined_segments, files_summary = _merge_segments(per_file)
+    combined_text = " ".join(s["text"] for s in combined_segments).strip()
+    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
     result = {
         "text": combined_text,
         "segments": combined_segments,
@@ -1239,12 +1313,6 @@ async def transcribe(
         "file_count": len(per_file),
         "combined": True,
     }
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [METRICS] mode=upload files={len(per_file)} transcribe_sec={elapsed:.1f} result_len={len(combined_text)} srt_len={len(srt_text)} result=success", flush=True)
-
-    total_kb = sum(r.get("text", "").__len__() for r in per_file)  # cheap log field
-    log_access(auth.get("user_id", ""), auth.get("username", ""), "transcribe",
-               f"{len(per_file)} files", request.client.host if request.client else "")
-    record_upload_usage(auth.get("user_id", ""), total_mb, auth.get("username", ""))
     return result
 
 
@@ -1853,11 +1921,13 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         .debug-msg.error { color: #ef4444; }
         .debug-msg.success { color: #22c55e; }
         .debug-empty { color: #3f3f46; font-style: italic; padding: 0.25rem 0; }
-        .status-dock { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 100; background: #18181b; border: 1px solid #27272a; border-radius: 10px; padding: 0.75rem 1rem; display: none; align-items: center; gap: 0.75rem; box-shadow: 0 8px 32px rgba(0,0,0,0.5); min-width: 240px; }
+        .status-dock { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 100; background: #18181b; border: 1px solid #27272a; border-radius: 10px; padding: 0.75rem 1rem; display: none; align-items: center; gap: 0.75rem; box-shadow: 0 8px 32px rgba(0,0,0,0.5); min-width: 260px; }
         .status-dock.visible { display: flex; }
-        .status-dock-inner { flex: 1; }
+        .status-dock-inner { flex: 1; min-width: 0; }
         .status-dock-title { font-size: 0.75rem; color: #a1a1aa; font-weight: 500; }
         .status-dock-sub { font-size: 0.6875rem; color: #52525b; margin-top: 2px; }
+        .progress-track { margin-top: 6px; height: 5px; border-radius: 3px; background: #27272a; overflow: hidden; }
+        .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg,#6366f1,#8b5cf6); transition: width 0.4s ease; border-radius: 3px; }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
         .status-dot.idle { background: #52525b; }
         .status-dot.active { background: #6366f1; animation: pulse 1.5s infinite; }
@@ -2054,6 +2124,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         <div class="status-dock-inner">
             <div class="status-dock-title" id="status-title">Ready</div>
             <div class="status-dock-sub" id="status-sub">Awaiting input</div>
+            <div class="progress-track" id="progress-track" style="display:none;"><div class="progress-fill" id="progress-fill"></div></div>
         </div>
     </div>
     <div class="toast" id="toast"></div>
@@ -2615,31 +2686,65 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             debug('info', 'Upload started: ' + (window.sessionFiles.length > 1 ? window.sessionFiles.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
             setStatus('active', 'Uploading', batchLabel);
             var t0 = Date.now();
+            setStatus('active', 'Uploading', batchLabel);
+            var progressTrack = document.getElementById('progress-track');
+            var progressFill = document.getElementById('progress-fill');
+            function setProgress(pct) {
+                if (progressTrack) progressTrack.style.display = 'block';
+                if (progressFill) progressFill.style.width = pct + '%';
+            }
             fetch('/transcribe', { method: 'POST', body: formData })
             .then(function(res) {
                 var ms = Date.now() - t0;
                 debug('info', 'Response: ' + res.status + ' in ' + ms + 'ms');
                 return res.json().then(function(data) {
-                    if (res.ok) {
-                        var model = data.model || '?'; var lang = data.language || '?';
-                        var textLen = (data.text || '').length;
-                        var fileCount = data.file_count || window.sessionFiles.length;
-                        renderTranscription(data, fileCount);
-                        debug('success', 'Transcription done | files=' + fileCount + (data.combined ? ' combined' : '') + ' model=' + model + ' lang=' + lang + ' text_len=' + textLen + ' srt_len=' + (data.srt || '').length);
-                        debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
-                        setStatus('done', 'Complete', Math.round(ms / 1000) + 's' + (data.combined && fileCount > 1 ? ' · ' + fileCount + ' files combined' : '')); showToast('Transcription ready');
-                    } else {
+                    if (!res.ok) {
                         var errorMsg = data.detail;
-                        if (Array.isArray(data.detail)) {
-                            errorMsg = data.detail.map(function(e) { return e.msg; }).join('; ');
-                        }
+                        if (Array.isArray(data.detail)) errorMsg = data.detail.map(function(e) { return e.msg; }).join('; ');
                         if (!errorMsg) errorMsg = 'Unknown (' + res.status + ')';
                         debug('error', 'Error: ' + errorMsg);
                         setStatus('error', 'Upload failed', errorMsg.substr(0, 120));
                         showToast(errorMsg);
+                        return;
                     }
+                    var jobIds = (data.jobs || []).map(function(j){ return j.job_id; }).join(',');
+                    setStatus('active', 'Transcribing ' + data.file_count + ' file(s)', 'Please wait…');
+                    setProgress(2);
+                    pollStatus(jobIds);
                 });
             }).catch(function(err) { debug('error', 'Network error: ' + err.message); setStatus('error', 'Network error', err.message); showToast('Network error'); });
+
+            function pollStatus(jobIds) {
+                var attempts = 0;
+                var timer = setInterval(function() {
+                    attempts++;
+                    fetch('/transcribe/status?jobs=' + encodeURIComponent(jobIds), { method: 'GET' })
+                    .then(function(r){ return r.json(); })
+                    .then(function(st) {
+                        var pct = st.progress_pct || 0;
+                        setProgress(pct);
+                        setStatus('active', 'Transcribing… ' + Math.round(pct) + '%', 'Combined transcript in progress');
+                        if (st.status === 'done') {
+                            clearInterval(timer);
+                            fetch('/transcribe/result?jobs=' + encodeURIComponent(jobIds), { method: 'GET' })
+                            .then(function(r){ return r.json(); })
+                            .then(function(data) {
+                                var ms = Date.now() - t0;
+                                var fileCount = data.file_count || window.sessionFiles.length;
+                                renderTranscription(data, fileCount);
+                                setProgress(100);
+                                debug('success', 'Transcription done | files=' + fileCount + ' combined model=' + (data.model||'?') + ' lang=' + (data.language||'?') + ' text_len=' + (data.text||'').length + ' srt_len=' + (data.srt||'').length);
+                                debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
+                                setStatus('done', 'Complete', Math.round(ms / 1000) + 's' + (fileCount > 1 ? ' · ' + fileCount + ' files combined' : '')); showToast('Transcription ready');
+                            }).catch(function(err){ clearInterval(timer); debug('error','result fetch: '+err.message); setStatus('error','Fetch failed', err.message); });
+                        } else if (st.status === 'error' || attempts > 1200) {
+                            clearInterval(timer);
+                            debug('error', 'Job error or timeout');
+                            setStatus('error', 'Transcription failed', 'A job errored or timed out');
+                        }
+                    }).catch(function(err){ debug('warn', 'status poll err: ' + err.message); });
+                }, 2000);
+            }
         }
         window.combineMore = function() {
             if (window.sessionFiles.length === 0) return;
@@ -2671,7 +2776,7 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
         window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var isSrt = text.indexOf(' --> ') !== -1; var ext = isSrt ? '.srt' : '.txt'; var mime = isSrt ? 'text/plain' : 'text/plain'; var blob = new Blob([text], { type: mime }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript' + ext; a.click(); URL.revokeObjectURL(url); };
-        window.resetForm = function() { if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; } window.pendingFiles = []; window.sessionFiles = []; fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
+        window.resetForm = function() { if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; } window.pendingFiles = []; window.sessionFiles = []; var pt = document.getElementById('progress-track'); if (pt) pt.style.display = 'none'; fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
             var overlay = document.getElementById("help-overlay");
