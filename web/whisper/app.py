@@ -3,16 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 import whisper
 import tempfile
 import os
+import math
+import shutil
 import logging
 import threading
 import uuid
 import time
+import subprocess
 from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Whisper CPU Transcription Service", version="1.2.0")
+app = FastAPI(title="Whisper CPU Transcription Service", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,8 +30,8 @@ model_lock = threading.Lock()
 transcribe_lock = threading.Lock()
 
 # Chunked transcription config — transcribe long files in fixed-size windows so
-# we can report real progress and bound memory. Chunks are small enough that a
-# fast CPU (tiny.en/small.en) finishes each in a few seconds.
+# we can report real progress and bound memory. Long videos are never loaded
+# whole: ffmpeg extracts each window to a small 16k mono wav on demand.
 CHUNK_SECONDS = 30
 CHUNK_OVERLAP_SECONDS = 2
 
@@ -66,13 +69,15 @@ async def health_check():
 
 
 def _save_upload(file: UploadFile, filename: str):
-    """Persist an uploaded file to a temp path, return the path."""
+    """Persist an uploaded file to a temp path, streaming (never buffering the
+    whole file in memory — videos can be multi-GB). Returns the path."""
     suffix = f".{filename.split('.')[-1]}" if "." in filename else ".tmp"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp_path = tmp.name
+    tmp.close()
     try:
-        with open(tmp_path, "wb") as f:
-            f.write(file.file.read())
+        with open(tmp_path, "wb") as out:
+            shutil.copyfileobj(file.file, out, length=1024 * 1024)
     except Exception:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -82,16 +87,132 @@ def _save_upload(file: UploadFile, filename: str):
 
 def _load_audio_mono(tmp_path: str):
     """Load audio as mono 16k float32 numpy via whisper's loader."""
-    audio = whisper.load_audio(tmp_path)  # np float32 mono 16k
-    return audio
+    return whisper.load_audio(tmp_path)  # np float32 mono 16k
+
+
+def _probe_duration_seconds(path: str) -> float:
+    """Media duration via ffprobe (works for audio AND video). 0.0 on failure."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return float(out.stdout.strip()) if out.stdout.strip() else 0.0
+    except Exception:
+        return 0.0
+
+
+def _extract_wav_window(src_path: str, start_sec: float, dur_sec: float, out_wav: str) -> bool:
+    """Extract [start_sec, start_sec+dur_sec] from any audio/video as a 16k mono
+    wav using ffmpeg. Bounded memory: only the window is written to disk."""
+    cmd = ["ffmpeg", "-y", "-nostdin", "-ss", f"{max(0.0, start_sec):.3f}"]
+    if dur_sec and dur_sec > 0:
+        cmd += ["-t", f"{dur_sec:.3f}"]
+    cmd += ["-i", src_path, "-vn", "-ar", "16000", "-ac", "1",
+            "-c:a", "pcm_s16le", "-f", "wav", out_wav]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=max(180, int((dur_sec or 60) * 6) + 120))
+    except Exception as e:
+        logger.error(f"ffmpeg window extraction failed: {e}")
+        return False
+    if r.returncode != 0:
+        logger.error(f"ffmpeg window rc={r.returncode}: {(r.stderr or '')[:200]}")
+        return False
+    return os.path.exists(out_wav) and os.path.getsize(out_wav) > 44
+
+
+def _transcribe_chunked(tmp_path: str, language: Optional[str], word_timestamps: bool,
+                        model_name: str, filename: str, progress_cb=None):
+    """Transcribe any audio/video in ffmpeg-extracted windows with global
+    timestamps. Never loads the whole file into memory, so multi-hour videos
+    transcribe within a small, bounded footprint."""
+    import numpy as np
+    import torch
+    whisper_model = load_model(model_name or os.getenv("WHISPER_MODEL", "tiny.en"))
+    logger.info(f"Transcribing (windowed): {filename}")
+    duration = _probe_duration_seconds(tmp_path)
+
+    all_segments = []
+    if duration <= 0:
+        # Rare: no container duration. Fall back to whisper's own loader
+        # (small files only) and chunk in memory.
+        audio = _load_audio_mono(tmp_path)
+        chunks = list(_chunk_audio(audio))
+        total = len(chunks)
+        for idx, (start_sample, chunk_audio) in enumerate(chunks):
+            tensor = torch.from_numpy(chunk_audio)
+            with transcribe_lock:
+                res = whisper_model.transcribe(
+                    tensor, language=language if language != "auto" else None,
+                    fp16=False, word_timestamps=word_timestamps,
+                )
+            offset = start_sample / 16000.0
+            for s in res.get("segments", []):
+                all_segments.append({
+                    "start": round((s.get("start") or 0) + offset, 3),
+                    "end": round((s.get("end") or 0) + offset, 3),
+                    "text": (s.get("text") or "").strip(),
+                })
+            if progress_cb:
+                progress_cb((idx + 1) / max(1, total))
+    else:
+        step = max(1.0, CHUNK_SECONDS - CHUNK_OVERLAP_SECONDS)
+        total = max(1, int(math.ceil((duration - CHUNK_OVERLAP_SECONDS) / step)))
+        workdir = tempfile.mkdtemp(prefix="whisper_win_")
+        start = 0.0
+        idx = 0
+        try:
+            while start < duration:
+                win_wav = os.path.join(workdir, f"w{idx}.wav")
+                if _extract_wav_window(tmp_path, start, CHUNK_SECONDS + CHUNK_OVERLAP_SECONDS, win_wav):
+                    try:
+                        chunk_audio = _load_audio_mono(win_wav)
+                        if chunk_audio is not None and len(chunk_audio) > 0:
+                            tensor = torch.from_numpy(np.ascontiguousarray(chunk_audio))
+                            with transcribe_lock:
+                                res = whisper_model.transcribe(
+                                    tensor, language=language if language != "auto" else None,
+                                    fp16=False, word_timestamps=word_timestamps,
+                                )
+                            for s in res.get("segments", []):
+                                all_segments.append({
+                                    "start": round((s.get("start") or 0) + start, 3),
+                                    "end": round((s.get("end") or 0) + start, 3),
+                                    "text": (s.get("text") or "").strip(),
+                                })
+                    finally:
+                        if os.path.exists(win_wav):
+                            try:
+                                os.unlink(win_wav)
+                            except Exception:
+                                pass
+                idx += 1
+                start += step
+                if progress_cb:
+                    progress_cb(min(1.0, start / duration))
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    # Dedupe overlapping tails: drop any segment whose start is inside the
+    # previous window's overlap region (its text was already captured).
+    merged = []
+    last_end = -1.0
+    for s in sorted(all_segments, key=lambda x: (x["start"], x["end"])):
+        if not s["text"]:
+            continue
+        if s["start"] < last_end - 0.05:
+            continue
+        merged.append(s)
+        last_end = max(last_end, s["end"])
+    logger.info(f"Transcription completed: {filename} ({len(merged)} segments)")
+    return merged
 
 
 def _chunk_audio(audio, chunk_sec: int = CHUNK_SECONDS, overlap_sec: int = CHUNK_OVERLAP_SECONDS):
     """Yield (start_sample, chunk_array) windows with a small overlap.
-
-    Overlap avoids cutting words at boundaries; the merge step drops the
-    duplicate tail of each window.
-    """
+    Used only for the rare no-duration fallback path."""
     sr = 16000
     chunk = chunk_sec * sr
     step = chunk - overlap_sec * sr
@@ -107,51 +228,12 @@ def _chunk_audio(audio, chunk_sec: int = CHUNK_SECONDS, overlap_sec: int = CHUNK
         start += step
 
 
-def _transcribe_chunked(tmp_path: str, language: Optional[str], word_timestamps: bool,
-                        model_name: str, filename: str, progress_cb=None):
-    """Transcribe a file in chunks, calling progress_cb(fraction_done) as each
-    chunk completes. Returns segments (list of dicts) with global timestamps."""
-    import numpy as np
-    whisper_model = load_model(model_name or os.getenv("WHISPER_MODEL", "tiny.en"))
-    logger.info(f"Transcribing (chunked): {filename}")
-    audio = _load_audio_mono(tmp_path)
-    chunks = list(_chunk_audio(audio))
-    total = len(chunks)
-    all_segments = []
-    for idx, (start_sample, chunk_audio) in enumerate(chunks):
-        # Convert numpy to torch tensor for direct model call (no temp file).
-        import torch
-        tensor = torch.from_numpy(chunk_audio)
-        with transcribe_lock:
-            res = whisper_model.transcribe(
-                tensor,
-                language=language if language != "auto" else None,
-                fp16=False,
-                word_timestamps=word_timestamps,
-            )
-        segs = res.get("segments", [])
-        offset = start_sample / 16000.0
-        for s in segs:
-            all_segments.append({
-                "start": round((s.get("start") or 0) + offset, 3),
-                "end": round((s.get("end") or 0) + offset, 3),
-                "text": (s.get("text") or "").strip(),
-            })
-        if progress_cb:
-            progress_cb((idx + 1) / total)
-    # Dedupe overlapping tails: drop any segment whose start is inside the
-    # previous chunk's overlap region (i.e., its text was already captured).
-    merged = []
-    last_end = -1.0
-    for s in sorted(all_segments, key=lambda x: (x["start"], x["end"])):
-        if not s["text"]:
-            continue
-        if s["start"] < last_end - 0.05:
-            continue
-        merged.append(s)
-        last_end = max(last_end, s["end"])
-    logger.info(f"Transcription completed: {filename} ({total} chunks)")
-    return merged
+def _is_media(content_type: Optional[str]) -> bool:
+    """Accept audio and video (and a tolerant octet-stream fallback)."""
+    if not content_type:
+        return False
+    ct = content_type.lower()
+    return ct.startswith("audio/") or ct.startswith("video/") or ct == "application/octet-stream"
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +251,8 @@ async def transcribe_async(
     model_name: str = Form("tiny.en"),
     language: Optional[str] = Form("en"),
 ):
-    if not file.content_type or not file.content_type.startswith("audio/"):
-        raise HTTPException(status_code=400, detail="File must be an audio file")
+    if not _is_media(file.content_type):
+        raise HTTPException(status_code=400, detail="File must be audio or video")
     job_id = uuid.uuid4().hex
     tmp_path = _save_upload(file, file.filename)
     with jobs_lock:
@@ -187,9 +269,11 @@ async def transcribe_async(
         try:
             with jobs_lock:
                 jobs[job_id]["status"] = "running"
+
             def _cb(frac):
                 with jobs_lock:
                     jobs[job_id]["progress"] = round(frac, 4)
+
             segs = _transcribe_chunked(
                 tmp_path, language, word_timestamps=False, model_name=model_name,
                 filename=file.filename, progress_cb=_cb,
@@ -225,7 +309,7 @@ async def progress(job_id: str):
         return {
             "job_id": job_id,
             "status": job["status"],
-            "progress": job["progress"],  # 0..1
+            "progress": job["progress"],
             "filename": job["filename"],
             "error": job["error"],
         }
@@ -252,7 +336,8 @@ async def delete_job(job_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Synchronous transcription — kept for the live-mic websocket path (short clips).
+# Synchronous transcription — kept for the live-mic websocket path (short clips)
+# and the programmatic sync API. Accepts audio and video.
 # ---------------------------------------------------------------------------
 
 @app.post("/transcribe")
@@ -261,8 +346,8 @@ def transcribe_audio(
     model_name: str = Form("tiny.en"),
     language: Optional[str] = Form("en"),
 ):
-    if not file.content_type or not file.content_type.startswith("audio/"):
-        raise HTTPException(status_code=400, detail="File must be an audio file")
+    if not _is_media(file.content_type):
+        raise HTTPException(status_code=400, detail="File must be audio or video")
     tmp_path = None
     try:
         tmp_path = _save_upload(file, file.filename)
@@ -279,7 +364,7 @@ def transcribe_audio(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error transcribing audio: {str(e)}")
+        logger.error(f"Error transcribing media: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
     finally:
         if tmp_path and os.path.exists(tmp_path):

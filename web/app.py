@@ -536,6 +536,40 @@ async def optional_user(request: Request):
 
 init_db()
 
+@app.get("/robots.txt")
+async def robots_txt():
+    from fastapi.responses import PlainTextResponse
+    body = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Sitemap: https://sqs.chat/sitemap.xml\n"
+    )
+    return PlainTextResponse(body)
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    from fastapi.responses import Response
+    urls = [
+        ("https://sqs.chat/", "1.0"),
+        ("https://sqs.chat/transcribe", "0.8"),
+        ("https://community.sqs.chat/", "0.8"),
+        ("https://community.sqs.chat/c/ai/6", "0.7"),
+        ("https://community.sqs.chat/c/guides/7", "0.7"),
+        ("https://community.sqs.chat/c/product-news/8", "0.6"),
+    ]
+    items = "".join(
+        f"<url><loc>{u}</loc><changefreq>weekly</changefreq><priority>{p}</priority></url>"
+        for u, p in urls
+    )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{items}</urlset>"
+    )
+    return Response(content=xml, media_type="application/xml")
+
+
 @app.get("/")
 async def index(user: dict = Depends(optional_user)):
     if user and user.get("username"):
@@ -1382,6 +1416,155 @@ async def api_v1_transcribe(
     }
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] files={len(per_file)} transcribe_sec={elapsed:.1f} srt_len={len(srt_text)}", flush=True)
     return result
+
+
+@app.post("/api/v1/transcribe/async")
+async def api_v1_transcribe_async(
+    files: List[UploadFile] = File(...),
+    language: str = Form("en"),
+    model: str = Form("tiny.en"),
+    api_key: str = Depends(require_api_key),
+):
+    """Queue audio/video for asynchronous transcription (API-key auth).
+
+    Built for large/full videos: returns immediately with job ids, then poll
+    status and fetch the combined result. Uploads are streamed to a temp file,
+    handed to the transcriber, and deleted — no media is retained.
+
+    Response: {status, jobs:[{job_id, filename}], file_count, status_url, result_url}
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+    jobs = []
+    for file in files:
+        if not file.content_type or not (file.content_type.startswith("audio/") or file.content_type.startswith("video/")):
+            raise HTTPException(status_code=400, detail=f"{file.filename}: must be audio or video")
+        if file.size and file.size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail=f"{file.filename}: too large. Max {MAX_FILE_SIZE_MB}MB")
+        suffix = file.filename.split(".")[-1] if "." in file.filename else "tmp"
+        tmp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{suffix}")
+        try:
+            with open(tmp_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            async with httpx.AsyncClient(timeout=1800.0) as client:
+                with open(tmp_path, "rb") as f:
+                    form_data = {"file": (file.filename, f, file.content_type)}
+                    data = {"language": language if language != "auto" else "en", "model_name": model}
+                    resp = await client.post(
+                        f"{WHISPER_SERVICE_URL}/transcribe-async",
+                        files=form_data, data=data,
+                    )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=500, detail=resp.text)
+            job = resp.json()
+            jobs.append({"job_id": job.get("job_id"), "filename": file.filename})
+            print(f"[API-ASYNC] file={file.filename} job={job.get('job_id','')[:8]}", flush=True)
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail=f"{file.filename}: upload timed out")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    job_ids = ",".join(j["job_id"] for j in jobs if j.get("job_id"))
+    return {
+        "status": "queued",
+        "jobs": jobs,
+        "file_count": len(jobs),
+        "status_url": f"/api/v1/transcribe/status?jobs={job_ids}",
+        "result_url": f"/api/v1/transcribe/result?jobs={job_ids}",
+    }
+
+
+@app.get("/api/v1/transcribe/status")
+async def api_v1_transcribe_status(
+    jobs: str = Query("", description="Comma-separated job ids"),
+    api_key: str = Depends(require_api_key),
+):
+    """Progress for async jobs. status: queued | running | done | error."""
+    job_ids = [j for j in jobs.split(",") if j]
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="No jobs")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        tasks = [client.get(f"{WHISPER_SERVICE_URL}/progress/{jid}") for jid in job_ids]
+        import asyncio as _aio
+        results = await _aio.gather(*tasks, return_exceptions=True)
+    overall = 0.0
+    per = []
+    all_done = True
+    any_error = False
+    for jid, r in zip(job_ids, results):
+        if isinstance(r, Exception):
+            per.append({"job_id": jid, "status": "error", "progress": 0})
+            any_error = True
+            continue
+        try:
+            d = r.json()
+        except Exception:
+            per.append({"job_id": jid, "status": "error", "progress": 0})
+            any_error = True
+            continue
+        overall += float(d.get("progress", 0))
+        per.append({"job_id": jid, "status": d.get("status"), "progress": float(d.get("progress", 0)), "error": d.get("error")})
+        if d.get("status") != "done":
+            all_done = False
+        if d.get("status") == "error":
+            any_error = True
+    overall = overall / len(job_ids)
+    return {
+        "status": "error" if any_error else ("done" if all_done else "running"),
+        "progress_pct": round(overall * 100, 1),
+        "jobs": per,
+    }
+
+
+@app.get("/api/v1/transcribe/result")
+async def api_v1_transcribe_result(
+    jobs: str = Query("", description="Comma-separated job ids"),
+    language: str = Query("en"),
+    api_key: str = Depends(require_api_key),
+):
+    """Fetch finished async jobs and return one combined transcript.
+
+    Returns 202 while any job is still running. Only jobs that are done are
+    consumed/freed, so polling early does not destroy an in-flight job.
+    Response: {text, segments, srt, format, language, model, files, file_count, combined}
+    """
+    job_ids = [j for j in jobs.split(",") if j]
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="No jobs")
+    per_file = []
+    any_error = False
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for jid in job_ids:
+            r = await client.get(f"{WHISPER_SERVICE_URL}/result/{jid}")
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("status") == "error":
+                    any_error = True
+                    continue
+                if d.get("status") == "done":
+                    per_file.append(d)
+                    try:
+                        await client.delete(f"{WHISPER_SERVICE_URL}/jobs/{jid}")
+                    except Exception:
+                        pass
+    if not per_file:
+        if any_error:
+            raise HTTPException(status_code=500, detail="Transcription job failed")
+        raise HTTPException(status_code=202, detail="Not all jobs done yet")
+    combined_segments, files_summary = _merge_segments(per_file)
+    combined_text = " ".join(s["text"] for s in combined_segments).strip()
+    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
+    return {
+        "text": combined_text,
+        "segments": combined_segments,
+        "srt": srt_text,
+        "format": "srt",
+        "language": language,
+        "model": "tiny.en",
+        "files": files_summary,
+        "file_count": len(per_file),
+        "combined": True,
+    }
 
 
 @app.get("/favicon.ico")

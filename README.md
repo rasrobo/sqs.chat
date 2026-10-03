@@ -14,9 +14,20 @@
 
 ## Programmatic API
 
-`POST /api/v1/transcribe` — API-key auth (`X-API-Key` header or Bearer), accepts
-one or more files and returns **one combined SRT** (multiple files are merged
-into a single continuous transcript in upload order). Key from the vault
+API-key auth (`X-API-Key` header or Bearer). Accepts **audio and video**;
+video is decoded with ffmpeg and the media is kept only in a temp file that is
+deleted the moment transcription finishes — **nothing is stored**.
+
+- `POST /api/v1/transcribe` — synchronous; returns one combined transcript
+  (multiple files are merged in upload order).
+- `POST /api/v1/transcribe/async` — queue jobs, return instantly with job ids
+  (use this for **full/long videos**, so a multi-hour upload never times out).
+- `GET /api/v1/transcribe/status?jobs=...` — progress.
+- `GET /api/v1/transcribe/result?jobs=...` — combined `text` + `segments` +
+  `srt` for finished jobs.
+
+Long media is transcribed in 30-second ffmpeg-extracted windows, so memory
+stays bounded regardless of video length. Key from the vault
 (`sqs_chat_api_key`), rate-limited, never logged. See
 `claw-way-django/docs/ops/sqs-chat-transcription-api.md` for full docs and examples.
 
