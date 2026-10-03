@@ -2862,6 +2862,8 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         function renderTranscription(data, fileCount) {
             // Default: each file is its own transcript. Only merged when the
             // user opted into "combine" (data.combined === true).
+            window.lastResults = (data.results && data.results.length) ? data.results : null;
+            window.lastCombined = !!data.combined;
             if (data.results && data.results.length > 1 && !data.combined) {
                 resultTextValue = data.results.map(function(r) {
                     return '### ' + r.filename + '\\n' + (r.srt || r.text || '(no speech)');
@@ -3015,7 +3017,29 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         });
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
-        window.downloadResult = function() { var text = resultTextValue || resultText.textContent; var isSrt = text.indexOf(' --> ') !== -1; var ext = isSrt ? '.srt' : '.txt'; var mime = isSrt ? 'text/plain' : 'text/plain'; var blob = new Blob([text], { type: mime }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = (currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript' + ext; a.click(); URL.revokeObjectURL(url); };
+        window.downloadResult = function() {
+            function save(name, text) {
+                var isSrt = (text || '').indexOf(' --> ') !== -1;
+                var ext = isSrt ? '.srt' : '.txt';
+                var blob = new Blob([text || ''], { type: 'text/plain' });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a'); a.href = url; a.download = name + ext; a.click();
+                setTimeout(function(){ URL.revokeObjectURL(url); }, 1500);
+            }
+            var rs = window.lastResults;
+            if (rs && rs.length > 1 && !window.lastCombined) {
+                // Separate transcripts → one download per source file (own SRT).
+                rs.forEach(function(r) {
+                    var base = (r.filename || 'signal').replace(/\.[^/.]+$/, '');
+                    save(base, r.srt || r.text || '');
+                });
+                showToast('Downloaded ' + rs.length + ' files');
+            } else {
+                var text = resultTextValue || resultText.textContent;
+                save((currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript', text);
+                showToast('Downloaded');
+            }
+        };
         window.resetForm = function() { if (window.batchTimer) { clearTimeout(window.batchTimer); window.batchTimer = null; } window.pendingFiles = []; window.sessionFiles = []; var pt = document.getElementById('progress-track'); if (pt) pt.style.display = 'none'; fileInput.value = ''; resultPanel.classList.remove('visible'); resultTextValue = ''; resultMeta.innerHTML = ''; currentFileName = ''; accumulatedText = ''; finalSegments = []; lastPartialText = ''; clearCaptionLine(); liveText.className = 'live-text empty'; liveText.innerHTML = 'Speak for live dictation. Partial text appears above, finalized text appears here.'; liveMeta.textContent = ''; liveIndicator.style.display = 'none'; hideStatus(); setMicButtonState('idle', 'Live dictation'); };
         
         window.toggleHelp = function() {
