@@ -2863,8 +2863,8 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             // user opted into "combine" (data.combined === true).
             if (data.results && data.results.length > 1 && !data.combined) {
                 resultTextValue = data.results.map(function(r) {
-                    return '### ' + r.filename + '\n' + (r.srt || r.text || '(no speech)');
-                }).join('\n\n');
+                    return '### ' + r.filename + '\\n' + (r.srt || r.text || '(no speech)');
+                }).join('\\n\\n');
             } else {
                 resultTextValue = data.srt || data.text || '';
             }
