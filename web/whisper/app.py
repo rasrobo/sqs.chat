@@ -7,15 +7,17 @@ import math
 import shutil
 import logging
 import threading
+import queue
 import uuid
 import time
+import wave
 import subprocess
 from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Whisper CPU Transcription Service", version="1.3.0")
+app = FastAPI(title="Whisper CPU Transcription Service", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +36,9 @@ transcribe_lock = threading.Lock()
 # whole: ffmpeg extracts each window to a small 16k mono wav on demand.
 CHUNK_SECONDS = 30
 CHUNK_OVERLAP_SECONDS = 2
+# Keep finished jobs for a while so a client can re-fetch the result after a
+# dropped connection / page refresh (results are idempotent within the TTL).
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", str(6 * 3600)))
 
 
 def load_model(model_name: str = "tiny.en"):
@@ -51,6 +56,8 @@ def load_model(model_name: str = "tiny.en"):
 @app.on_event("startup")
 async def startup_event():
     load_model(os.getenv("WHISPER_MODEL", "tiny.en"))
+    threading.Thread(target=_job_worker, daemon=True).start()
+    threading.Thread(target=_cleanup_worker, daemon=True).start()
 
 
 @app.get("/")
@@ -60,11 +67,14 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    with jobs_lock:
+        queued = sum(1 for j in jobs.values() if j["status"] in ("queued", "running"))
     return {
         "status": "healthy",
         "model_loaded": model is not None,
         "service": "whisper-cpu-transcription",
-        "busy": transcribe_lock.locked(),
+        "busy": (job_queue.qsize() > 0) or transcribe_lock.locked(),
+        "queued": queued,
     }
 
 
@@ -86,8 +96,23 @@ def _save_upload(file: UploadFile, filename: str):
 
 
 def _load_audio_mono(tmp_path: str):
-    """Load audio as mono 16k float32 numpy via whisper's loader."""
-    return whisper.load_audio(tmp_path)  # np float32 mono 16k
+    """Load audio as mono 16k float32 numpy via whisper's loader (fallback)."""
+    return whisper.load_audio(tmp_path)
+
+
+def _read_wav_16k_mono(path: str):
+    """Read a 16k mono pcm_s16le wav directly (no ffmpeg round-trip). Falls back
+    to whisper's loader for anything unexpected."""
+    try:
+        with wave.open(path, "rb") as w:
+            if (w.getframerate() == 16000 and w.getnchannels() == 1
+                    and w.getsampwidth() == 2):
+                frames = w.readframes(w.getnframes())
+                import numpy as np
+                return np.frombuffer(frames, dtype="<i2").astype("float32") / 32768.0
+    except Exception:
+        pass
+    return _load_audio_mono(path)
 
 
 def _probe_duration_seconds(path: str) -> float:
@@ -113,7 +138,7 @@ def _extract_wav_window(src_path: str, start_sec: float, dur_sec: float, out_wav
             "-c:a", "pcm_s16le", "-f", "wav", out_wav]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=max(180, int((dur_sec or 60) * 6) + 120))
+                           timeout=max(300, int((dur_sec or 60) * 10) + 300))
     except Exception as e:
         logger.error(f"ffmpeg window extraction failed: {e}")
         return False
@@ -121,6 +146,24 @@ def _extract_wav_window(src_path: str, start_sec: float, dur_sec: float, out_wav
         logger.error(f"ffmpeg window rc={r.returncode}: {(r.stderr or '')[:200]}")
         return False
     return os.path.exists(out_wav) and os.path.getsize(out_wav) > 44
+
+
+def _chunk_audio(audio, chunk_sec: int = CHUNK_SECONDS, overlap_sec: int = CHUNK_OVERLAP_SECONDS):
+    """Yield (start_sample, chunk_array) windows with a small overlap.
+    Used only for the rare no-duration fallback path."""
+    sr = 16000
+    chunk = chunk_sec * sr
+    step = chunk - overlap_sec * sr
+    n = len(audio)
+    if n <= chunk:
+        yield 0, audio
+        return
+    start = 0
+    while start < n:
+        yield start, audio[start:start + chunk]
+        if start + chunk >= n:
+            break
+        start += step
 
 
 def _transcribe_chunked(tmp_path: str, language: Optional[str], word_timestamps: bool,
@@ -168,7 +211,7 @@ def _transcribe_chunked(tmp_path: str, language: Optional[str], word_timestamps:
                 win_wav = os.path.join(workdir, f"w{idx}.wav")
                 if _extract_wav_window(tmp_path, start, CHUNK_SECONDS + CHUNK_OVERLAP_SECONDS, win_wav):
                     try:
-                        chunk_audio = _load_audio_mono(win_wav)
+                        chunk_audio = _read_wav_16k_mono(win_wav)
                         if chunk_audio is not None and len(chunk_audio) > 0:
                             tensor = torch.from_numpy(np.ascontiguousarray(chunk_audio))
                             with transcribe_lock:
@@ -210,24 +253,6 @@ def _transcribe_chunked(tmp_path: str, language: Optional[str], word_timestamps:
     return merged
 
 
-def _chunk_audio(audio, chunk_sec: int = CHUNK_SECONDS, overlap_sec: int = CHUNK_OVERLAP_SECONDS):
-    """Yield (start_sample, chunk_array) windows with a small overlap.
-    Used only for the rare no-duration fallback path."""
-    sr = 16000
-    chunk = chunk_sec * sr
-    step = chunk - overlap_sec * sr
-    n = len(audio)
-    if n <= chunk:
-        yield 0, audio
-        return
-    start = 0
-    while start < n:
-        yield start, audio[start:start + chunk]
-        if start + chunk >= n:
-            break
-        start += step
-
-
 def _is_media(content_type: Optional[str]) -> bool:
     """Accept audio and video (and a tolerant octet-stream fallback)."""
     if not content_type:
@@ -237,12 +262,72 @@ def _is_media(content_type: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Job registry for async transcription with progress (used by the web app for
-# browser uploads so it can show an accurate progress bar).
+# Job registry + sequential worker. Long videos are heavy, so jobs run ONE at a
+# time (a single worker) — a queue gives each job the full CPU and keeps memory
+# bounded instead of thrashing several multi-hour transcodes at once.
 # ---------------------------------------------------------------------------
 
 jobs = {}
 jobs_lock = threading.Lock()
+job_queue: "queue.Queue" = queue.Queue()
+
+
+def _job_worker():
+    while True:
+        item = job_queue.get()
+        job_id, tmp_path, model_name, language, filename = item
+        try:
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job is None:  # cancelled/expired before it ran
+                    continue
+                job["status"] = "running"
+
+            def _cb(frac):
+                with jobs_lock:
+                    if job_id in jobs:
+                        jobs[job_id]["progress"] = round(frac, 4)
+
+            segs = _transcribe_chunked(
+                tmp_path, language, word_timestamps=False, model_name=model_name,
+                filename=filename, progress_cb=_cb,
+            )
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id]["progress"] = 1.0
+                    jobs[job_id]["result"] = {
+                        "segments": segs,
+                        "filename": filename,
+                        "language": language or "en",
+                        "model": model_name or os.getenv("WHISPER_MODEL", "tiny.en"),
+                    }
+        except Exception as e:
+            logger.error(f"job {job_id} failed: {e}")
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]["status"] = "error"
+                    jobs[job_id]["error"] = str(e)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            job_queue.task_done()
+
+
+def _cleanup_worker():
+    """Expire finished jobs after JOB_TTL_SECONDS (keeps results re-fetchable)."""
+    while True:
+        time.sleep(300)
+        cutoff = time.time() - JOB_TTL_SECONDS
+        with jobs_lock:
+            stale = [jid for jid, j in jobs.items()
+                     if j.get("created_at", 0) < cutoff
+                     and j.get("status") in ("done", "error")]
+            for jid in stale:
+                jobs.pop(jid, None)
 
 
 @app.post("/transcribe-async")
@@ -264,39 +349,7 @@ async def transcribe_async(
             "error": None,
             "created_at": time.time(),
         }
-
-    def _run():
-        try:
-            with jobs_lock:
-                jobs[job_id]["status"] = "running"
-
-            def _cb(frac):
-                with jobs_lock:
-                    jobs[job_id]["progress"] = round(frac, 4)
-
-            segs = _transcribe_chunked(
-                tmp_path, language, word_timestamps=False, model_name=model_name,
-                filename=file.filename, progress_cb=_cb,
-            )
-            with jobs_lock:
-                jobs[job_id]["status"] = "done"
-                jobs[job_id]["progress"] = 1.0
-                jobs[job_id]["result"] = {
-                    "segments": segs,
-                    "filename": file.filename,
-                    "language": language or "en",
-                    "model": model_name or os.getenv("WHISPER_MODEL", "tiny.en"),
-                }
-        except Exception as e:
-            logger.error(f"job {job_id} failed: {e}")
-            with jobs_lock:
-                jobs[job_id]["status"] = "error"
-                jobs[job_id]["error"] = str(e)
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-    threading.Thread(target=_run, daemon=True).start()
+    job_queue.put((job_id, tmp_path, model_name, language or "en", file.filename))
     return {"job_id": job_id, "filename": file.filename}
 
 

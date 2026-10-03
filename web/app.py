@@ -1200,6 +1200,55 @@ def _format_srt_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _per_file_result(r: dict) -> dict:
+    """One file's transcript + SRT (text derived from segments when needed)."""
+    segs = r.get("segments", []) or []
+    text = (r.get("text") or "").strip() or " ".join(s.get("text", "") for s in segs).strip()
+    return {
+        "filename": r.get("filename", ""),
+        "text": text,
+        "segments": segs,
+        "srt": segments_to_srt(segs) if segs else text,
+    }
+
+
+def _build_result(per_file: list, language: str = "en", combine: bool = False) -> dict:
+    """Build the transcript response.
+
+    Default (combine=False): each file is its OWN transcript — multiple uploads
+    are NOT merged unless the caller explicitly opts in with combine=true.
+    Legacy single-File behaviour is preserved (text/segments/srt at the top).
+    """
+    results = [_per_file_result(r) for r in per_file]
+    out = {
+        "results": results,
+        "file_count": len(results),
+        "combined": bool(combine and len(results) > 1),
+        "format": "srt",
+        "language": language,
+        "model": "tiny.en",
+    }
+    if combine:
+        combined_segments, files_summary = _merge_segments(per_file)
+        combined_text = " ".join(s["text"] for s in combined_segments).strip()
+        srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
+        out.update({
+            "text": combined_text,
+            "segments": combined_segments,
+            "srt": srt_text,
+            "files": files_summary,
+        })
+    else:
+        # Back-compat: a single file still returns top-level text/segments/srt.
+        out.update({
+            "files": [{"filename": x["filename"], "text": x["text"]} for x in results],
+            "text": results[0]["text"] if len(results) == 1 else "",
+            "segments": results[0]["segments"] if len(results) == 1 else [],
+            "srt": results[0]["srt"] if len(results) == 1 else "",
+        })
+    return out
+
+
 @app.post("/transcribe")
 async def transcribe(
     request: Request,
@@ -1316,43 +1365,36 @@ async def transcribe_status(
 @app.get("/transcribe/result")
 async def transcribe_result(
     jobs: str = Query("", description="Comma-separated job ids"),
-    language: str = Form("en"),
+    combine: int = Query(0, description="1 = merge all files into one transcript"),
+    language: str = Query("en"),
     auth: dict = Depends(get_current_user),
 ):
-    """Fetch finished whisper jobs and merge them into one combined SRT."""
+    """Fetch finished whisper jobs.
+
+    Default: each file is returned as its OWN transcript (no merging). Pass
+    combine=1 to merge into one combined SRT. Results are re-fetchable (the
+    whisper job is kept for its TTL), so a dropped poll can retry safely.
+    """
     job_ids = [j for j in jobs.split(",") if j]
     if not job_ids:
         raise HTTPException(status_code=400, detail="No jobs")
     per_file = []
+    any_error = False
     async with httpx.AsyncClient(timeout=15.0) as client:
         for jid in job_ids:
             r = await client.get(f"{WHISPER_SERVICE_URL}/result/{jid}")
             if r.status_code == 200:
                 d = r.json()
+                if d.get("status") == "error":
+                    any_error = True
+                    continue
                 if d.get("status") == "done":
                     per_file.append(d)
-                # delete to free memory
-                try:
-                    await client.delete(f"{WHISPER_SERVICE_URL}/jobs/{jid}")
-                except Exception:
-                    pass
     if not per_file:
+        if any_error:
+            raise HTTPException(status_code=500, detail="Transcription failed")
         raise HTTPException(status_code=202, detail="Not all jobs done yet")
-    combined_segments, files_summary = _merge_segments(per_file)
-    combined_text = " ".join(s["text"] for s in combined_segments).strip()
-    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
-    result = {
-        "text": combined_text,
-        "segments": combined_segments,
-        "srt": srt_text,
-        "format": "srt",
-        "language": language,
-        "model": "tiny.en",
-        "files": files_summary,
-        "file_count": len(per_file),
-        "combined": True,
-    }
-    return result
+    return _build_result(per_file, language, combine=bool(combine))
 
 
 @app.post("/api/v1/transcribe")
@@ -1360,13 +1402,16 @@ async def api_v1_transcribe(
     request: Request,
     files: List[UploadFile] = File(...),
     language: str = Form("en"),
+    combine: bool = Form(False),
     api_key: str = Depends(require_api_key),
 ):
-    """Programmatic transcription API (API-key auth). Returns combined SRT.
+    """Programmatic transcription API (API-key auth).
 
     Headers: X-API-Key: <vault key>  (or Authorization: Bearer <key>)
-    Body:    multipart/form-data, field `files` (one or more), optional language.
-    Response: {text, segments, srt, format, language, model, files, file_count, combined}
+    Body:    multipart/form-data, `files` (one or more), optional `language`,
+             optional `combine` (default false).
+    Response: {results:[{filename,text,segments,srt}], file_count, combined, ...}
+    Multiple files are transcribed SEPARATELY unless combine=true.
     """
     import time as _time
     start_time = _time.time()
@@ -1406,22 +1451,8 @@ async def api_v1_transcribe(
                 os.unlink(tmp_path)
 
     elapsed = _time.time() - start_time
-    combined_segments, files_summary = _merge_segments(per_file)
-    combined_text = " ".join(r.get("text", "").strip() for r in per_file if r.get("text"))
-    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
-
-    result = {
-        "text": combined_text,
-        "segments": combined_segments,
-        "srt": srt_text,
-        "format": "srt",
-        "language": language,
-        "model": "tiny.en",
-        "files": files_summary,
-        "file_count": len(per_file),
-        "combined": True,
-    }
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] files={len(per_file)} transcribe_sec={elapsed:.1f} srt_len={len(srt_text)}", flush=True)
+    result = _build_result(per_file, language, combine=combine)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [API] files={len(per_file)} combine={combine} transcribe_sec={elapsed:.1f}", flush=True)
     return result
 
 
@@ -1528,14 +1559,16 @@ async def api_v1_transcribe_status(
 @app.get("/api/v1/transcribe/result")
 async def api_v1_transcribe_result(
     jobs: str = Query("", description="Comma-separated job ids"),
+    combine: int = Query(0, description="1 = merge all files into one transcript"),
     language: str = Query("en"),
     api_key: str = Depends(require_api_key),
 ):
-    """Fetch finished async jobs and return one combined transcript.
+    """Fetch finished async jobs.
 
-    Returns 202 while any job is still running. Only jobs that are done are
-    consumed/freed, so polling early does not destroy an in-flight job.
-    Response: {text, segments, srt, format, language, model, files, file_count, combined}
+    Returns 202 while any job is still running. Default: each file is its OWN
+    transcript; pass combine=1 to merge. Jobs are NOT deleted here, so a result
+    can be re-fetched safely (the whisper service expires them on its TTL).
+    Response: {results:[...], file_count, combined, ...}
     """
     job_ids = [j for j in jobs.split(",") if j]
     if not job_ids:
@@ -1552,28 +1585,11 @@ async def api_v1_transcribe_result(
                     continue
                 if d.get("status") == "done":
                     per_file.append(d)
-                    try:
-                        await client.delete(f"{WHISPER_SERVICE_URL}/jobs/{jid}")
-                    except Exception:
-                        pass
     if not per_file:
         if any_error:
             raise HTTPException(status_code=500, detail="Transcription job failed")
         raise HTTPException(status_code=202, detail="Not all jobs done yet")
-    combined_segments, files_summary = _merge_segments(per_file)
-    combined_text = " ".join(s["text"] for s in combined_segments).strip()
-    srt_text = segments_to_srt(combined_segments) if combined_segments else combined_text
-    return {
-        "text": combined_text,
-        "segments": combined_segments,
-        "srt": srt_text,
-        "format": "srt",
-        "language": language,
-        "model": "tiny.en",
-        "files": files_summary,
-        "file_count": len(per_file),
-        "combined": True,
-    }
+    return _build_result(per_file, language, combine=bool(combine))
 
 
 @app.get("/favicon.ico")
@@ -2211,6 +2227,10 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     <span class="mic-label" id="mic-label">__MIC_REMAINING__min remaining</span>
                 </div>
             </div>
+            <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.8125rem;color:#a1a1aa;margin-top:0.35rem;cursor:pointer;user-select:none;">
+                <input type="checkbox" id="combine-toggle" style="width:15px;height:15px;accent-color:#6366f1;cursor:pointer;">
+                Combine multiple files into one transcript
+            </label>
             <div class="mic-error" id="mic-error"></div>
             <div class="mic-quota-exceeded" id="mic-quota-exceeded" style="display:none;background:#1c0a0a;border:1px solid #991b1b;border-radius:8px;padding:0.75rem 1rem;font-size:0.8125rem;color:#ef4444;">
                 Daily mic limit reached. Upload audio instead, or try again tomorrow.
@@ -2839,14 +2859,21 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         // not selection order (fast small files finish before slow big ones),
         // which would misorder the transcript. resetForm() clears the panel.
         function renderTranscription(data, fileCount) {
-            // Server returns the authoritative SRT when combined (order correct).
-            resultTextValue = data.srt || data.text || '';
+            // Default: each file is its own transcript. Only merged when the
+            // user opted into "combine" (data.combined === true).
+            if (data.results && data.results.length > 1 && !data.combined) {
+                resultTextValue = data.results.map(function(r) {
+                    return '### ' + r.filename + '\n' + (r.srt || r.text || '(no speech)');
+                }).join('\n\n');
+            } else {
+                resultTextValue = data.srt || data.text || '';
+            }
             resultText.textContent = resultTextValue || 'No output';
             resultPanel.classList.add('visible');
             var model = data.model || '?'; var lang = data.language || '?';
             var fcBadge = (data.combined && fileCount > 1)
                 ? '<span class="result-meta-badge">' + fileCount + ' files combined</span>'
-                : '';
+                : (fileCount > 1 ? '<span class="result-meta-badge">' + fileCount + ' files (separate)</span>' : '');
             resultMeta.innerHTML = '<span class="result-meta-badge">model:' + model + '</span><span class="result-meta-badge">lang:' + lang + '</span><span class="result-meta-badge">SRT</span>' + fcBadge;
         }
 
@@ -2865,20 +2892,31 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
             if (window.pendingFiles.length === 0) return;
             var batch = window.pendingFiles;
             window.pendingFiles = [];
-            // Session = everything we've picked so far this session (for combine).
-            window.sessionFiles = window.sessionFiles.concat(batch);
-            window.sessionFiles.sort(function(a, b) { return a.name.localeCompare(b.name); });
+            // Combine is OPT-IN. Default: each selection is its own transcript.
+            var combineOn = !!(document.getElementById('combine-toggle') && document.getElementById('combine-toggle').checked);
+            window.combineMode = combineOn;
+            var filesToSend;
+            if (combineOn) {
+                // Merge the whole session (server-authoritative order).
+                window.sessionFiles = window.sessionFiles.concat(batch);
+                window.sessionFiles.sort(function(a, b) { return a.name.localeCompare(b.name); });
+                filesToSend = window.sessionFiles;
+            } else {
+                window.sessionFiles = batch;
+                filesToSend = batch;
+            }
             var file = batch[0];
             currentFileName = file.name;
             var formData = new FormData();
-            for (var j = 0; j < window.sessionFiles.length; j++) { formData.append('files', window.sessionFiles[j]); }
+            for (var j = 0; j < filesToSend.length; j++) { formData.append('files', filesToSend[j]); }
             formData.append('language', langSelect.value);
             resultPanel.classList.remove('visible');
-            var batchLabel = window.sessionFiles.length > 1 ? window.sessionFiles.length + ' files (combined)' : file.name;
-            debug('info', 'Upload started: ' + (window.sessionFiles.length > 1 ? window.sessionFiles.map(function(x){return x.name;}).join(', ') : file.name) + ' lang=' + langSelect.value);
+            var batchLabel = filesToSend.length > 1
+                ? filesToSend.length + ' files' + (combineOn ? ' (combined)' : ' — separate transcripts')
+                : file.name;
+            debug('info', 'Upload started: ' + filesToSend.map(function(x){return x.name;}).join(', ') + ' lang=' + langSelect.value + ' combine=' + combineOn);
             setStatus('active', 'Uploading', batchLabel);
             var t0 = Date.now();
-            setStatus('active', 'Uploading', batchLabel);
             var progressTrack = document.getElementById('progress-track');
             var progressFill = document.getElementById('progress-fill');
             function setProgress(pct) {
@@ -2908,6 +2946,8 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
 
             function pollStatus(jobIds) {
                 var attempts = 0;
+                // Poll every 2s. Cap ~12h — CPU transcription of long videos is
+                // slow, so never give up early on a job that is still running.
                 var timer = setInterval(function() {
                     attempts++;
                     fetch('/transcribe/status?jobs=' + encodeURIComponent(jobIds), { method: 'GET' })
@@ -2915,24 +2955,31 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
                     .then(function(st) {
                         var pct = st.progress_pct || 0;
                         setProgress(pct);
-                        setStatus('active', 'Transcribing… ' + Math.round(pct) + '%', 'Combined transcript in progress');
+                        var mins = Math.round((Date.now() - t0) / 60000);
+                        setStatus('active', 'Transcribing… ' + Math.round(pct) + '%', 'elapsed ' + mins + ' min — this can take a while for long videos');
                         if (st.status === 'done') {
                             clearInterval(timer);
-                            fetch('/transcribe/result?jobs=' + encodeURIComponent(jobIds), { method: 'GET' })
+                            var resultUrl = '/transcribe/result?jobs=' + encodeURIComponent(jobIds) + '&combine=' + (window.combineMode ? 1 : 0);
+                            fetch(resultUrl, { method: 'GET' })
                             .then(function(r){ return r.json(); })
                             .then(function(data) {
                                 var ms = Date.now() - t0;
                                 var fileCount = data.file_count || window.sessionFiles.length;
                                 renderTranscription(data, fileCount);
                                 setProgress(100);
-                                debug('success', 'Transcription done | files=' + fileCount + ' combined model=' + (data.model||'?') + ' lang=' + (data.language||'?') + ' text_len=' + (data.text||'').length + ' srt_len=' + (data.srt||'').length);
-                                debug('info', 'SRT excerpt: ' + (data.srt || data.text || '').substr(0, 120) + '...');
-                                setStatus('done', 'Complete', Math.round(ms / 1000) + 's' + (fileCount > 1 ? ' · ' + fileCount + ' files combined' : '')); showToast('Transcription ready');
+                                debug('success', 'Transcription done | files=' + fileCount + ' combined=' + (data.combined||false) + ' model=' + (data.model||'?') + ' lang=' + (data.language||'?') + ' text_len=' + (data.text||'').length);
+                                var note = (data.combined && fileCount > 1) ? ' · ' + fileCount + ' files combined'
+                                    : (fileCount > 1 ? ' · ' + fileCount + ' files' : '');
+                                setStatus('done', 'Complete', Math.round(ms / 1000) + 's' + note); showToast('Transcription ready');
                             }).catch(function(err){ clearInterval(timer); debug('error','result fetch: '+err.message); setStatus('error','Fetch failed', err.message); });
-                        } else if (st.status === 'error' || attempts > 1200) {
+                        } else if (st.status === 'error') {
                             clearInterval(timer);
-                            debug('error', 'Job error or timeout');
-                            setStatus('error', 'Transcription failed', 'A job errored or timed out');
+                            debug('error', 'Job error');
+                            setStatus('error', 'Transcription failed', 'A job errored');
+                        } else if (attempts > 21600) {  // ~12h at 2s
+                            clearInterval(timer);
+                            debug('error', 'Job timeout');
+                            setStatus('error', 'Still running', 'Transcription exceeded the 12h poll window');
                         }
                     }).catch(function(err){ debug('warn', 'status poll err: ' + err.message); });
                 }, 2000);
