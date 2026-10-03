@@ -40,6 +40,11 @@ CHUNK_OVERLAP_SECONDS = 2
 # Keep finished jobs for a while so a client can re-fetch the result after a
 # dropped connection / page refresh (results are idempotent within the TTL).
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", str(6 * 3600)))
+# Optional GPU backend: a faster-whisper (speaches) OpenAI-compatible endpoint,
+# reached over an SSH tunnel from the hub. When set, each ffmpeg window is sent
+# there (much faster + more accurate); local whisper is the fallback.
+GPU_WHISPER_URL = os.getenv("GPU_WHISPER_URL", "").strip()
+GPU_WHISPER_MODEL = os.getenv("GPU_WHISPER_MODEL", "Systran/faster-whisper-large-v3")
 
 
 def load_model(model_name: str = "tiny.en"):
@@ -74,6 +79,7 @@ async def health_check():
         "status": "healthy",
         "model_loaded": model is not None,
         "service": "whisper-cpu-transcription",
+        "backend": "gpu" if GPU_WHISPER_URL else "local",
         "busy": (job_queue.qsize() > 0) or transcribe_lock.locked(),
         "queued": queued,
     }
@@ -149,6 +155,58 @@ def _extract_wav_window(src_path: str, start_sec: float, dur_sec: float, out_wav
     return os.path.exists(out_wav) and os.path.getsize(out_wav) > 44
 
 
+def _gpu_transcribe_window(win_wav: str, language: Optional[str]):
+    """POST one window wav to the GPU faster-whisper endpoint; return segments."""
+    import urllib.request
+    import json as _json
+    import uuid as _uuid
+    boundary = "----gpu" + _uuid.uuid4().hex
+    with open(win_wav, "rb") as f:
+        audio = f.read()
+
+    def _field(name, value):
+        return (f'--{boundary}\r\nContent-Disposition: form-data; '
+                f'name="{name}"\r\n\r\n{value}\r\n').encode()
+
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; '
+            f'name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
+    body += audio + b"\r\n"
+    body += _field("model", GPU_WHISPER_MODEL)
+    body += _field("response_format", "verbose_json")
+    body += _field("language", language if language and language != "auto" else "en")
+    body += f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        GPU_WHISPER_URL.rstrip("/") + "/v1/audio/transcriptions",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=600) as r:
+        d = _json.loads(r.read().decode())
+    return d.get("segments", []) or []
+
+
+def _local_transcribe_window(whisper_model, win_wav, language, word_timestamps, offset, out_segments):
+    """Transcribe one window with the in-process whisper model."""
+    import numpy as np
+    import torch
+    chunk_audio = _read_wav_16k_mono(win_wav)
+    if chunk_audio is None or len(chunk_audio) == 0:
+        return
+    tensor = torch.from_numpy(np.ascontiguousarray(chunk_audio))
+    with transcribe_lock:
+        res = whisper_model.transcribe(
+            tensor, language=language if language != "auto" else None,
+            fp16=False, word_timestamps=word_timestamps,
+        )
+    for s in res.get("segments", []):
+        out_segments.append({
+            "start": round((s.get("start") or 0) + offset, 3),
+            "end": round((s.get("end") or 0) + offset, 3),
+            "text": (s.get("text") or "").strip(),
+        })
+
+
 def _chunk_audio(audio, chunk_sec: int = CHUNK_SECONDS, overlap_sec: int = CHUNK_OVERLAP_SECONDS):
     """Yield (start_sample, chunk_array) windows with a small overlap.
     Used only for the rare no-duration fallback path."""
@@ -212,20 +270,20 @@ def _transcribe_chunked(tmp_path: str, language: Optional[str], word_timestamps:
                 win_wav = os.path.join(workdir, f"w{idx}.wav")
                 if _extract_wav_window(tmp_path, start, CHUNK_SECONDS + CHUNK_OVERLAP_SECONDS, win_wav):
                     try:
-                        chunk_audio = _read_wav_16k_mono(win_wav)
-                        if chunk_audio is not None and len(chunk_audio) > 0:
-                            tensor = torch.from_numpy(np.ascontiguousarray(chunk_audio))
-                            with transcribe_lock:
-                                res = whisper_model.transcribe(
-                                    tensor, language=language if language != "auto" else None,
-                                    fp16=False, word_timestamps=word_timestamps,
-                                )
-                            for s in res.get("segments", []):
-                                all_segments.append({
-                                    "start": round((s.get("start") or 0) + start, 3),
-                                    "end": round((s.get("end") or 0) + start, 3),
-                                    "text": (s.get("text") or "").strip(),
-                                })
+                        if GPU_WHISPER_URL:
+                            try:
+                                gpu_segs = _gpu_transcribe_window(win_wav, language)
+                                for s in gpu_segs:
+                                    all_segments.append({
+                                        "start": round((s.get("start") or 0) + start, 3),
+                                        "end": round((s.get("end") or 0) + start, 3),
+                                        "text": (s.get("text") or "").strip(),
+                                    })
+                            except Exception as _ge:
+                                logger.warning(f"GPU window failed ({_ge}); local fallback")
+                                _local_transcribe_window(whisper_model, win_wav, language, word_timestamps, start, all_segments)
+                        else:
+                            _local_transcribe_window(whisper_model, win_wav, language, word_timestamps, start, all_segments)
                     finally:
                         if os.path.exists(win_wav):
                             try:
