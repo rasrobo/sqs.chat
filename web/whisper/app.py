@@ -5,6 +5,7 @@ import tempfile
 import os
 import math
 import shutil
+import asyncio
 import logging
 import threading
 import queue
@@ -339,7 +340,9 @@ async def transcribe_async(
     if not _is_media(file.content_type):
         raise HTTPException(status_code=400, detail="File must be audio or video")
     job_id = uuid.uuid4().hex
-    tmp_path = _save_upload(file, file.filename)
+    # Write the upload to disk OFF the event loop — a multi-GB write here would
+    # otherwise block /progress and /health, making the client think jobs died.
+    tmp_path = await asyncio.to_thread(_save_upload, file, file.filename)
     with jobs_lock:
         jobs[job_id] = {
             "status": "queued",

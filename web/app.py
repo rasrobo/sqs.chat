@@ -1338,16 +1338,17 @@ async def transcribe_status(
     all_done = True
     any_error = False
     for jid, r in zip(job_ids, results):
+        # A transient backend blip (timeout / connection) is NOT a job failure —
+        # report it as still-running so the client keeps polling. Only a real
+        # 404 (job gone) or whisper status "error" is fatal.
         if isinstance(r, Exception):
-            per.append({"job_id": jid, "status": "error", "progress": 0})
-            any_error = True
-            continue
+            per.append({"job_id": jid, "status": "running", "progress": 0}); all_done = False; continue
+        if r.status_code == 404:
+            per.append({"job_id": jid, "status": "error", "progress": 0}); any_error = True; continue
         try:
             d = r.json()
         except Exception:
-            per.append({"job_id": jid, "status": "error", "progress": 0})
-            any_error = True
-            continue
+            per.append({"job_id": jid, "status": "running", "progress": 0}); all_done = False; continue
         overall += float(d.get("progress", 0))
         per.append({"job_id": jid, "status": d.get("status"), "progress": float(d.get("progress", 0))})
         if d.get("status") != "done":
@@ -1532,16 +1533,16 @@ async def api_v1_transcribe_status(
     all_done = True
     any_error = False
     for jid, r in zip(job_ids, results):
+        # Transient backend blips are "running" (keep polling); only 404 / real
+        # job error is fatal.
         if isinstance(r, Exception):
-            per.append({"job_id": jid, "status": "error", "progress": 0})
-            any_error = True
-            continue
+            per.append({"job_id": jid, "status": "running", "progress": 0}); all_done = False; continue
+        if r.status_code == 404:
+            per.append({"job_id": jid, "status": "error", "progress": 0}); any_error = True; continue
         try:
             d = r.json()
         except Exception:
-            per.append({"job_id": jid, "status": "error", "progress": 0})
-            any_error = True
-            continue
+            per.append({"job_id": jid, "status": "running", "progress": 0}); all_done = False; continue
         overall += float(d.get("progress", 0))
         per.append({"job_id": jid, "status": d.get("status"), "progress": float(d.get("progress", 0)), "error": d.get("error")})
         if d.get("status") != "done":
