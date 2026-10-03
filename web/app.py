@@ -3017,23 +3017,48 @@ APP_PAGE_TEMPLATE = """<!DOCTYPE html>
         });
 
         window.copyResult = function() { navigator.clipboard.writeText(resultTextValue || resultText.textContent); showToast('Copied'); }; // Copies SRT content (includes timestamps)
+        function _zipFiles(files) {
+            // Minimal ZIP (stored, no compression) — no external library.
+            var enc = new TextEncoder();
+            function crc32(u8) { var c = ~0; for (var i = 0; i < u8.length; i++) { c ^= u8[i]; for (var k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1)); } return (~c) >>> 0; }
+            function u16(n) { return new Uint8Array([n & 255, (n >>> 8) & 255]); }
+            function u32(n) { return new Uint8Array([n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]); }
+            function cat(list) { var len = 0; list.forEach(function(x) { len += x.length; }); var out = new Uint8Array(len), o = 0; list.forEach(function(x) { out.set(x, o); o += x.length; }); return out; }
+            var now = new Date();
+            var dosTime = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((now.getSeconds() / 2) & 31);
+            var dosDate = (((now.getFullYear() - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+            var locals = [], centrals = [], offset = 0;
+            files.forEach(function(f) {
+                var nameB = enc.encode(f.name), dataB = enc.encode(f.text || '');
+                var crc = crc32(dataB);
+                var local = cat([u32(0x04034b50), u16(20), u16(0), u16(0), u16(dosTime), u16(dosDate), u32(crc), u32(dataB.length), u32(dataB.length), u16(nameB.length), u16(0), nameB, dataB]);
+                locals.push(local);
+                centrals.push(cat([u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(dosTime), u16(dosDate), u32(crc), u32(dataB.length), u32(dataB.length), u16(nameB.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), nameB]));
+                offset += local.length;
+            });
+            var cdSize = centrals.reduce(function(a, c) { return a + c.length; }, 0);
+            var end = cat([u32(0x06054b50), u16(0), u16(0), u16(files.length), u16(files.length), u32(cdSize), u32(offset), u16(0)]);
+            return new Blob(locals.concat(centrals).concat([end]), { type: 'application/zip' });
+        }
         window.downloadResult = function() {
+            function saveBlob(name, blob) {
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a'); a.href = url; a.download = name; a.click();
+                setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+            }
             function save(name, text) {
                 var isSrt = (text || '').indexOf(' --> ') !== -1;
-                var ext = isSrt ? '.srt' : '.txt';
-                var blob = new Blob([text || ''], { type: 'text/plain' });
-                var url = URL.createObjectURL(blob);
-                var a = document.createElement('a'); a.href = url; a.download = name + ext; a.click();
-                setTimeout(function(){ URL.revokeObjectURL(url); }, 1500);
+                saveBlob(name + (isSrt ? '.srt' : '.txt'), new Blob([text || ''], { type: 'text/plain' }));
             }
             var rs = window.lastResults;
             if (rs && rs.length > 1 && !window.lastCombined) {
-                // Separate transcripts → one download per source file (own SRT).
-                rs.forEach(function(r) {
+                // Separate transcripts → ONE zip containing one SRT per source file.
+                var files = rs.map(function(r) {
                     var base = (r.filename || 'signal').replace(/\.[^/.]+$/, '');
-                    save(base, r.srt || r.text || '');
+                    return { name: base + '.srt', text: r.srt || r.text || '' };
                 });
-                showToast('Downloaded ' + rs.length + ' files');
+                saveBlob('transcripts.zip', _zipFiles(files));
+                showToast('Downloaded transcripts.zip (' + rs.length + ' files)');
             } else {
                 var text = resultTextValue || resultText.textContent;
                 save((currentFileName.replace(/\.[^/.]+$/, '') || 'signal') + '_transcript', text);
