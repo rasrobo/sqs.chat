@@ -70,10 +70,13 @@ async def cleanup_old_uploads():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Locked down 2026-10-03: the app is same-origin (sqs.chat, GitHub session)
+    # and the programmatic API is key-based (X-API-Key) — no wildcard CORS and
+    # no cross-origin credentials.
+    allow_origins=["https://sqs.chat", "https://www.sqs.chat"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "Authorization", "Content-Type"],
 )
 
 WHISPER_SERVICE_URL = os.getenv("WHISPER_SERVICE_URL", "http://whisper-service:8000")
@@ -1247,7 +1250,9 @@ async def transcribe(
                         files=form_data, data=data
                     )
             if resp.status_code != 200:
-                raise HTTPException(status_code=500, detail=resp.text)
+                log_error = resp.text[:300]
+                print(f"[transcribe-error] {log_error}", flush=True)
+                raise HTTPException(status_code=502, detail="Transcription backend error")
             job = resp.json()
             jobs.append({"job_id": job.get("job_id"), "filename": file.filename})
             print(f"[UPLOAD] file={file.filename} kb={file_size_kb:.0f} job={job.get('job_id','')[:8]}", flush=True)
@@ -1390,7 +1395,9 @@ async def api_v1_transcribe(
                         files=form_data, data=data
                     )
             if resp.status_code != 200:
-                raise HTTPException(status_code=500, detail=resp.text)
+                log_error = resp.text[:300]
+                print(f"[transcribe-error] {log_error}", flush=True)
+                raise HTTPException(status_code=502, detail="Transcription backend error")
             per_file.append(resp.json())
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail=f"{file.filename}: transcription timed out")
@@ -1455,7 +1462,9 @@ async def api_v1_transcribe_async(
                         files=form_data, data=data,
                     )
             if resp.status_code != 200:
-                raise HTTPException(status_code=500, detail=resp.text)
+                log_error = resp.text[:300]
+                print(f"[transcribe-error] {log_error}", flush=True)
+                raise HTTPException(status_code=502, detail="Transcription backend error")
             job = resp.json()
             jobs.append({"job_id": job.get("job_id"), "filename": file.filename})
             print(f"[API-ASYNC] file={file.filename} job={job.get('job_id','')[:8]}", flush=True)
